@@ -7,7 +7,7 @@ import {
   getEventById,
 } from "../controllers/eventController.js";
 
-import { triggerBatchCall } from "../controllers/eventController.js";
+import { triggerBatchCall ,getRSVPDataByEvent,retryBatchCall } from "../controllers/eventController.js";
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
@@ -23,5 +23,9 @@ router.get("/", getEventsByUser);
 router.get("/:eventId", getEventById);
 
 router.post("/:eventId/call-batch", triggerBatchCall);
+// Get RSVP data for a single event
+router.get("/:eventId/rsvps", getRSVPDataByEvent);
+router.post('/events/:eventId/call-batch/retry', retryBatchCall);
+
 
 export default router;

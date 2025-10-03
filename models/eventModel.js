@@ -59,7 +59,7 @@ export const getEventWithParticipants = async (event_id) => {
   // 2) Fetch participants for that event
   const { data: participants, error: participantsError } = await supabase
     .from("participants")
-    .select("full_name, phone_number, email")
+    .select(" participant_id,full_name, phone_number, email")
     .eq("event_id", event_id);
 
   if (participantsError) throw participantsError;

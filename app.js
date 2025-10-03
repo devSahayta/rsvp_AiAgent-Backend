@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import cors from "cors";
 import userRoutes from "./routes/userRoutes.js";
 import eventRoutes from "./routes/eventRoutes.js";
+import uploadRoutes from "./routes/uploadRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -12,6 +13,7 @@ app.use(cors({ origin: "http://localhost:5173", credentials: true }));
 
 app.use("/api/users", userRoutes);
 app.use("/api/events", eventRoutes);
+app.use("/api/uploads", uploadRoutes);
 
 app.get("/", (_req, res) => res.send("API is running..."));
 

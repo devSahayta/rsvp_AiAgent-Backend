@@ -1,5 +1,5 @@
 import express from "express";
-import { submitUpload, getUploadsByParticipant, updateUpload } from "../controllers/uploadController.js";
+import { submitUpload, getUploadsByParticipant, updateUpload,getConversationByParticipant,updateConversation } from "../controllers/uploadController.js";
 import multer from "multer";
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -12,5 +12,8 @@ router.post("/", upload.any(), submitUpload);
 router.get("/:participant_id", getUploadsByParticipant);
 
 router.put("/:uploadId", upload.single("file"), updateUpload);
+
+router.get("/conversation/:participantId", getConversationByParticipant);
+router.put("/conversation/:participantId", updateConversation);
 
 export default router;

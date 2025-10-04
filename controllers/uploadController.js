@@ -345,3 +345,66 @@ export const updateUpload = async (req, res) => {
     res.status(500).json({ error: 'Failed to update document' });
   }
 };
+
+// ✅ Get conversation details for a participant
+export const getConversationByParticipant = async (req, res) => {
+  try {
+    const { participantId } = req.params;
+
+    if (!participantId) {
+      return res.status(400).json({ error: "participantId is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("conversation_results")
+      .select("rsvp_status, number_of_guests, notes")
+      .eq("participant_id", participantId)
+      .single();
+
+    if (error || !data) {
+      console.error("Error fetching conversation:", error);
+      return res.status(404).json({ message: "Conversation not found" });
+    }
+
+    return res.status(200).json(data);
+  } catch (error) {
+    console.error("getConversationByParticipant error:", error);
+    res.status(500).json({ error: "Failed to fetch conversation", details: error.message });
+  }
+};
+
+// ✅ Update conversation details for a participant
+export const updateConversation = async (req, res) => {
+  try {
+    const { participantId } = req.params;
+    const { rsvp_status, number_of_guests, notes } = req.body;
+
+    if (!participantId) {
+      return res.status(400).json({ error: "participantId is required" });
+    }
+
+    const updateFields = {
+      rsvp_status,
+      number_of_guests,
+      notes,
+      last_updated: new Date().toISOString(),
+    };
+
+    const { data, error } = await supabase
+      .from("conversation_results")
+      .update(updateFields)
+      .eq("participant_id", participantId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Error updating conversation:", error);
+      throw error;
+    }
+
+    res.status(200).json({ message: "Conversation updated successfully", data });
+  } catch (error) {
+    console.error("updateConversation error:", error);
+    res.status(500).json({ error: "Failed to update conversation", details: error.message });
+  }
+};

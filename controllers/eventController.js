@@ -240,7 +240,7 @@ export const triggerBatchCall = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // 1️⃣ Fetch event details from events table
+    // 1️⃣ Fetch event details
     const { data: eventData, error: eventError } = await supabase
       .from("events")
       .select("event_name")
@@ -264,22 +264,13 @@ export const triggerBatchCall = async (req, res) => {
       return res.status(400).json({ error: "No participants found for this event" });
     }
 
-    // 3️⃣ Prepare recipient data for ElevenLabs
+    // 3️⃣ Prepare recipients for ElevenLabs
     const recipients = participants.map((p) => ({
       phone_number: p.phone_number,
-      // dynamic_variables: {
-      //   event_id: p.event_id,
-      //   event_name: eventData.event_name,
-      //   full_name: p.full_name,
-      //   participant_id: p.participant_id, // optional: helpful for tracking responses
-      // },
     }));
-    console.log(recipients)
 
-    // 4️⃣ Schedule call batch for 1 minute in future
     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
 
-    // 5️⃣ Build ElevenLabs API payload
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
       agent_id: process.env.ELEVENLABS_AGENT_ID,
@@ -290,7 +281,7 @@ export const triggerBatchCall = async (req, res) => {
 
     console.log("Payload to ElevenLabs:", JSON.stringify(payload, null, 2));
 
-    // 6️⃣ Send batch call request to ElevenLabs
+    // 4️⃣ Trigger ElevenLabs Batch
     const response = await fetch(
       "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
       {
@@ -304,67 +295,82 @@ export const triggerBatchCall = async (req, res) => {
     );
 
     const data = await response.json();
-    console.log(data)
-
-    
+    console.log("ElevenLabs Response:", data);
 
     if (!response.ok) {
       console.error("❌ ElevenLabs API Error:", data);
       return res.status(500).json({ error: "Batch call failed", details: data });
     }
 
-        // 7️⃣ Update event table with batch_id from ElevenLabs
+    // 5️⃣ Update event with batch_id + status
     const { error: updateError } = await supabase
       .from("events")
       .update({
         batch_id: data.id,
-        // batch_status: data.status,
-        // batch_created_at: new Date().toISOString(),
+        batch_status: data.status || "queued",
       })
       .eq("event_id", eventId);
 
     if (updateError) {
       console.error("Error updating event with batch_id:", updateError);
-      // Still return success since the batch was created
-      return res.status(200).json({
-        message: "Batch call started but failed to update event",
-        batch: data,
-        recipients_count: participants.length,
-        warning: "Batch ID not saved to database"
-      });
     }
 
-    // 7️⃣ (Optional) Store batch info in DB
-    // await supabase.from("call_batches").insert([
-    //   {
-    //     event_id: eventId,
-    //     batch_id: data.id,
-    //     status: data.status,
-    //     created_at: new Date().toISOString(),
-    //   },
-    // ]);
+    // 6️⃣ 🔥 Create placeholder conversation_results for each participant if missing
+    for (const participant of participants) {
+      const { data: existing, error: existingError } = await supabase
+        .from("conversation_results")
+        .select("participant_id")
+        .eq("participant_id", participant.participant_id)
+        .maybeSingle();
 
+      if (existingError) {
+        console.warn("Check existing conversation error:", existingError);
+        continue;
+      }
+
+      if (!existing) {
+        const { error: insertError } = await supabase.from("conversation_results").insert([
+          {
+            participant_id: participant.participant_id,
+            event_id: eventId,
+            call_status: "pending", // Default
+            rsvp_status: "Maybe", // Default neutral state
+            number_of_guests: 0,
+            notes: null,
+            last_updated: new Date().toISOString(),
+          },
+        ]);
+
+        if (insertError) {
+          console.error(
+            `Error inserting placeholder conversation for participant ${participant.participant_id}:`,
+            insertError
+          );
+        }
+      }
+    }
+
+    // 7️⃣ Return success response
     return res.status(200).json({
-      message: "✅ Batch call started successfully",
+      message: "✅ Batch call started successfully & placeholders created",
       batch: data,
       recipients_count: participants.length,
     });
-
   } catch (err) {
     console.error("triggerBatchCall error:", err);
     return res.status(500).json({ error: "Failed to trigger batch call" });
   }
 };
 
+
 export const retryBatchCall = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const { batch_id } = req.body;
 
-    // Fetch event details
+    // 1️⃣ Fetch event batch_id
     const { data: eventData, error: eventError } = await supabase
       .from("events")
-      .select("event_name")
+      .select("event_name, batch_id")
       .eq("event_id", eventId)
       .single();
 
@@ -372,145 +378,169 @@ export const retryBatchCall = async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
 
-    // Fetch participants
-    const { data: participants, error: participantError } = await supabase
-      .from("participants")
-      .select("participant_id, full_name, phone_number")
-      .eq("event_id", eventId);
-
-    if (participantError || !participants || participants.length === 0) {
-      return res.status(400).json({ error: "No participants found" });
+    if (!eventData.batch_id) {
+      return res.status(400).json({ error: "No batch found for this event" });
     }
 
-    // Prepare recipients
-    const recipients = participants.map((p) => ({
-      phone_number: p.phone_number,
-    }));
-
-    // Schedule for 1 minute in future
-    const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
-
-    // Build payload
-    const payload = {
-      call_name: `${eventData.event_name}-retry-${Date.now()}`,
-      agent_id: process.env.ELEVENLABS_AGENT_ID,
-      agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
-      scheduled_time_unix: scheduledUnix,
-      recipients,
-    };
-
-    // Call ElevenLabs API
+    // 2️⃣ Call ElevenLabs Retry API
     const response = await fetch(
-      "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${eventData.batch_id}/retry`,
       {
         method: "POST",
         headers: {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(payload),
       }
     );
 
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("ElevenLabs API error:", data);
-      return res.status(500).json({ error: "Batch call retry failed", details: data });
+      console.error("❌ ElevenLabs Retry API error:", data);
+      return res.status(500).json({
+        error: "Retry batch call failed",
+        details: data,
+      });
     }
 
-    // Update event table with new batch_id
+    // 3️⃣ Update event with new batch_id and status
     await supabase
       .from("events")
       .update({
-        batch_id: data.batch_id,
-        batch_status: data.status,
+        batch_id: data.id || eventData.batch_id,
+        batch_status: data.status || "retrying",
         batch_created_at: new Date().toISOString(),
       })
       .eq("event_id", eventId);
 
     return res.status(200).json({
-      message: "Batch call retry started successfully",
+      message: "✅ Retry batch call started successfully",
       batch: data,
-      recipients_count: participants.length,
     });
-
   } catch (err) {
     console.error("retryBatchCall error:", err);
-    return res.status(500).json({ error: "Failed to retry batch call" });
+    return res.status(500).json({ error: "Internal Server Error" });
   }
 };
 
 
-// export const triggerBatchCall = async (req, res) => {
-//   try {
-//     const { eventId } = req.params;
 
-//     // 1. Get all participants for this event
-//     const { data: participants, error } = await supabase
-//       .from("participants")
-//       .select("full_name, phone_number")
-//       .eq("event_id", eventId);
+export const syncBatchStatuses = async (req, res) => {
+  try {
+    const { eventId } = req.params;
 
-//     if (error) throw error;
-//     if (!participants || participants.length === 0) {
-//       return res.status(400).json({ error: "No participants found" });
-//     }
+    // ✅ 1. Fetch event to get batch_id
+    const { data: eventData, error: eventError } = await supabase
+      .from("events")
+      .select("batch_id")
+      .eq("event_id", eventId)
+      .single();
 
-//     // 2. Prepare recipients list
-//     const recipients = participants.map((p) => ({
-//       phone_number: p.phone_number, // ✅ correct format
-//     }));
+    if (eventError || !eventData?.batch_id) {
+      return res.status(404).json({ error: "Batch not found for this event" });
+    }
 
-//     // 3. Schedule for 1 minute in the future
-//     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+    const batchId = eventData.batch_id;
 
-//     // 4. Build payload
-//     const payload = {
-//       call_name: `event-${eventId}-${Date.now()}`,
-//       agent_id: process.env.ELEVENLABS_AGENT_ID,
-//       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
-//       scheduled_time_unix: scheduledUnix,
-//       recipients,
-//     };
+    // ✅ 2. Fetch ElevenLabs batch details
+    const elevenResponse = await fetch(
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${batchId}`,
+      {
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
 
-//     // 5. Call ElevenLabs API
-//     const response = await fetch(
-//       "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
-//       {
-//         method: "POST",
-//         headers: {
-//           "xi-api-key": process.env.ELEVENLABS_API_KEY,
-//           "Content-Type": "application/json",
-//         },
-//         body: JSON.stringify(payload),
-//       }
-//     );
+    const batchData = await elevenResponse.json();
 
-//     const data = await response.json();
-//     // console.log(data)
+    if (!elevenResponse.ok) {
+      console.error("ElevenLabs API error:", batchData);
+      return res.status(500).json({ error: "Failed to fetch batch details", details: batchData });
+    }
 
-//     if (!response.ok) {
-//       console.error("ElevenLabs API error:", data);
-//       return res.status(500).json({ error: "Batch call failed", details: data });
-//     }
+    const recipients = batchData.recipients || [];
+    if (recipients.length === 0)
+      return res.status(400).json({ error: "No recipients found in batch" });
 
-//     // 6. Optional: Save to DB
-//     // await supabase.from("call_batches").insert([
-//     //   {
-//     //     event_id: eventId,
-//     //     job_id: data.id,
-//     //     status: data.status,
-//     //     created_at: new Date().toISOString(),
-//     //   },
-//     // ]);
+    // ✅ 3. Fetch all participants for the event
+    const { data: participants, error: partError } = await supabase
+      .from("participants")
+      .select("participant_id, phone_number")
+      .eq("event_id", eventId);
 
-//     return res.status(200).json({ message: "Batch call started", batch: data });
-//   } catch (err) {
-//     console.error("triggerBatchCall error:", err);
-//     return res.status(500).json({ error: "Failed to trigger batch call" });
-//   }
-// };
+    if (partError) throw partError;
 
+    // ✅ 4. Map recipients to participants via phone number
+    let updatedCount = 0;
+    for (const recipient of recipients) {
+      const participant = participants.find(
+        (p) => p.phone_number === recipient.phone_number
+      );
 
+      if (participant) {
+        // ✅ Update conversation_results.call_status
+        const { error: updateError } = await supabase
+          .from("conversation_results")
+          .update({ call_status: recipient.status })
+          .eq("participant_id", participant.participant_id);
 
+        if (!updateError) updatedCount++;
+      }
+    }
+
+    // ✅ 5. Also update batch_status in events
+    await supabase
+      .from("events")
+      .update({ batch_status: batchData.status })
+      .eq("event_id", eventId);
+
+    return res.status(200).json({
+      message: "Batch call statuses synced successfully",
+      updated: updatedCount,
+      total: recipients.length,
+      batch_status: batchData.status,
+    });
+  } catch (err) {
+    console.error("syncBatchStatuses error:", err);
+    return res.status(500).json({ error: "Failed to sync batch statuses" });
+  }
+};
+
+export const getBatchStatus = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // Fetch event to get batch_id
+    const { data: eventData, error } = await supabase
+      .from("events")
+      .select("batch_id")
+      .eq("event_id", eventId)
+      .single();
+
+    if (error || !eventData?.batch_id) {
+      return res.status(404).json({ error: "No batch found for this event" });
+    }
+
+    const batchId = eventData.batch_id;
+
+    // Fetch batch details from ElevenLabs
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${batchId}`,
+      {
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const data = await response.json();
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("getBatchStatus error:", err);
+    return res.status(500).json({ error: "Failed to fetch batch status" });
+  }
+};

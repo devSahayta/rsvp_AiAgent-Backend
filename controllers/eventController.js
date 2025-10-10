@@ -321,6 +321,7 @@ export const triggerBatchCall = async (req, res) => {
         .from("conversation_results")
         .select("participant_id")
         .eq("participant_id", participant.participant_id)
+        .eq("event_id", eventId)
         .maybeSingle();
 
       if (existingError) {

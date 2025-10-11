@@ -335,7 +335,7 @@ export const triggerBatchCall = async (req, res) => {
             participant_id: participant.participant_id,
             event_id: eventId,
             call_status: "pending", // Default
-            rsvp_status: "Maybe", // Default neutral state
+            rsvp_status: null, // Default neutral state
             number_of_guests: 0,
             notes: null,
             last_updated: new Date().toISOString(),

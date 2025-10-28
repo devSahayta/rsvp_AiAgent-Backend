@@ -1,6 +1,6 @@
 // routes/userRoutes.js
 import express from "express";
-import { addUser, fetchUsers, fetchUserById } from "../controllers/userController.js";
+import { addUser, fetchUsers, fetchUserById ,fetchUserCredits } from "../controllers/userController.js";
 
 const router = express.Router();
 
@@ -12,5 +12,8 @@ router.get("/", fetchUsers);
 
 // GET /api/users/:id -> Get user by ID
 router.get("/:id", fetchUserById);
+
+// GET /api/users/:id/credits
+router.get("/:id/credits", fetchUserCredits);
 
 export default router;

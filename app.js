@@ -5,6 +5,7 @@ import cors from "cors";
 import userRoutes from "./routes/userRoutes.js";
 import eventRoutes from "./routes/eventRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
+import creditRoutes from "./routes/creditRoutes.js";
 
 dotenv.config();
 const app = express();
@@ -14,6 +15,7 @@ app.use(cors({ origin: ["http://localhost:5173","https://rsvp-ai-agent-frontend.
 app.use("/api/users", userRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/uploads", uploadRoutes);
+app.use("/api/credits", creditRoutes);
 
 app.get("/", (_req, res) => res.send("API is running..."));
 

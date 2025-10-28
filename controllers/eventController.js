@@ -355,6 +355,7 @@ export const triggerBatchCall = async (req, res) => {
     return res.status(200).json({
       message: "✅ Batch call started successfully & placeholders created",
       batch: data,
+       batch_id: data.id,
       recipients_count: participants.length,
     });
   } catch (err) {

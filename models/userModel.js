@@ -34,3 +34,15 @@ export const getUserById = async (id) => {
   if (error) throw error;
   return data;
 };
+
+export const updateUserCredits = async (user_id, newCredits) => {
+  const { data, error } = await supabase
+    .from("users")
+    .update({ credits: newCredits })
+    .eq("user_id", user_id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data;
+};

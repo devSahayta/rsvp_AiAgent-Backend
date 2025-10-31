@@ -285,23 +285,44 @@ export const handleIncomingMessage = async (req, res) => {
     }
 
     // === If already completed: enter helpful assistant mode (formal)
-    if (callStatus === "completed") {
-      // If user explicitly asked for status, return it directly
-      const norm = normalize(userText);
-      if (["status","my status","what is my status","what's my status","show my status"].some(k => norm.includes(k))) {
-        await sendWhatsAppTextMessage(from, `✅ RSVP Status: ${convo.rsvp_status ?? "—"}\n👥 Guests: ${convo.number_of_guests ?? "—"}\n📝 Notes: ${convo.notes ?? "—"}\nIf you wish to change anything, reply 'Update'.`);
-        return res.sendStatus(200);
-      }
+  // === If already completed: enter helpful assistant mode (formal)
+if (callStatus === "completed") {
+  // If user explicitly asked for status, return it directly
+  const norm = normalize(userText);
+  if (["status","my status","what is my status","what's my status","show my status"].some(k => norm.includes(k))) {
+    await sendWhatsAppTextMessage(from, `✅ RSVP Status: ${convo.rsvp_status ?? "—"}\n👥 Guests: ${convo.number_of_guests ?? "—"}\n📝 Notes: ${convo.notes ?? "—"}\nIf you wish to change anything, reply 'Update'.`);
+    return res.sendStatus(200);
+  }
 
-      // If user asked for common FAQ/local info, serve locally
-      if (["venue","where is the venue","what's the venue","location","where is"].some(k => norm.includes(k))) {
-        await sendWhatsAppTextMessage(from, `📍 Venue: ${WEDDING.venue}\nDirections: ${WEDDING.location_link}`);
-        return res.sendStatus(200);
-      }
-      if (["date","when is the wedding","wedding date","what is the date"].some(k => norm.includes(k))) {
-        await sendWhatsAppTextMessage(from, `📅 Date: ${WEDDING.date}`);
-        return res.sendStatus(200);
-      }
+  // ✅ NEW — Special handling when RSVP = NO
+  if (convo.rsvp_status === "No") {
+    if (detectOffTopic(userText)) {
+      await sendWhatsAppTextMessage(from, `I can only assist with the wedding RSVP. If you change your mind later, feel free to message me anytime.`);
+      return res.sendStatus(200);
+    }
+    if (["thanks","thank you","thx","ok","okay","noted"].includes(norm)) {
+      await sendWhatsAppTextMessage(from, `You’re welcome, ${displayName}. If you change your mind later, feel free to message me anytime.`);
+      return res.sendStatus(200);
+    }
+    if (["status","my status","what is my status","what's my status","show my status"].some(k => norm.includes(k))) {
+      await sendWhatsAppTextMessage(from, `❌ RSVP Status: Not Attending\nIf plans change, reply 'Update'.`);
+      return res.sendStatus(200);
+    }
+    // Venue/date allowed only if asked directly
+    if (["venue","where is the venue","what's the venue","location","where is"].some(k => norm.includes(k))) {
+      await sendWhatsAppTextMessage(from, `📍 Venue: ${WEDDING.venue}\nDirections: ${WEDDING.location_link}`);
+      return res.sendStatus(200);
+    }
+    if (["date","when is the wedding","wedding date","what is the date"].some(k => norm.includes(k))) {
+      await sendWhatsAppTextMessage(from, `📅 Date: ${WEDDING.date}`);
+      return res.sendStatus(200);
+    }
+
+    // Default polite answer — does NOT assume attendance ✅
+    await sendWhatsAppTextMessage(from, `Understood. If you need event info or want to update your RSVP, just reply here.`);
+    return res.sendStatus(200);
+  }
+
       if (["dress","dress code","what to wear"].some(k => norm.includes(k))) {
         await sendWhatsAppTextMessage(from, `👗 Dress code: ${WEDDING.dress_code}`);
         return res.sendStatus(200);

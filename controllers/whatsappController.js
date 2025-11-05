@@ -449,23 +449,26 @@
           // event-scoped folder: participant-docs/<event_id>/<participant_id>/<filename>
           const filename = `${timestamp}_${safeName}${ext}`;
 
-          const publicUrl = await uploadToSupabaseStorage(eventId, pid, filename, buffer, contentType);
+          // Use the unified storage logic: upload returns internal path (not full public url)
+const storagePath = `${eventId}/${pid}/${filename}`; // same key we will upload to
 
-          // record doc entry
-          const docEntry = { url: publicUrl, type: cache.currentDoc.document_type, uploaded_at: new Date().toISOString() };
-          cache.currentDoc.docs = cache.currentDoc.docs || [];
-          cache.currentDoc.docs.push(docEntry);
+const { error: uploadError } = await supabase.storage
+  .from("participant-docs")
+  .upload(storagePath, buffer, { contentType, upsert: false });
 
-          // persist upload row
-          await supabase.from("uploads").insert({
-            participant_id: pid,
-            participant_relatives_name: cache.currentDoc.name || displayName,
-            document_url: publicUrl,
-            document_type: cache.currentDoc.document_type,
-            proof_uploaded: true,
-            role: cache.currentDoc.role || "Self",
-            created_at: new Date().toISOString()
-          });
+if (uploadError) throw uploadError;
+
+// store internal path in DB
+await supabase.from("uploads").insert({
+  participant_id: pid,
+  participant_relatives_name: cache.currentDoc.name || displayName,
+  document_url: `participant-docs/${storagePath}`,          // internal key only (important)
+  document_type: cache.currentDoc.document_type,
+  proof_uploaded: true,
+  role: cache.currentDoc.role || "Self",
+  created_at: new Date().toISOString()
+});
+
 
           // push to pendingDocs as completed
           cache.pendingDocs = cache.pendingDocs || [];

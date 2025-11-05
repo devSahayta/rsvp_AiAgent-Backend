@@ -19,7 +19,7 @@ export const sendWhatsAppMessage = async (to, participantName = null) => {
         to,
         type: "template",
         template: {
-          name: "rsvp_invite",
+          name: "invite_rsvp",
           language: { code: "en_US" },
           components: [
             {

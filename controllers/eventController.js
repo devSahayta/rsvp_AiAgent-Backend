@@ -233,6 +233,131 @@ export const getRSVPDataByEvent = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch RSVP data" });
   }
 };
+// ✅ Get single event + participants securely with user check
+export const getEventDetails = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const userId = req.user.user_id;
+
+    // ✅ Enforce that event belongs to the logged-in user
+    const event = await getEventWithParticipants(eventId);
+
+    if (!event || event.user_id !== userId) {
+      return res.status(404).json({ error: "Event not found or unauthorized" });
+    }
+
+    return res.status(200).json(event);
+  } catch (err) {
+    console.error("getEventDetails error:", err);
+    return res.status(500).json({ error: "Server error fetching event" });
+  }
+};
+
+// GET /api/events/:eventId/conversation-status
+export const getConversationStatus = async (req, res) => {
+  const { eventId } = req.params;
+
+  const { count, error } = await supabase
+    .from("conversation_results")
+    .select("*", { count: "exact", head: true })
+    .eq("event_id", eventId);
+
+  if (error) return res.status(500).json({ error });
+
+  res.json({ hasConversations: count > 0 });
+};
+
+export const getEventRSVPData = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // ✅ Get Participants
+    const { data: participants, error: pError } = await supabase
+      .from("participants")
+      .select("*")
+      .eq("event_id", eventId);
+
+    if (pError) return res.status(400).json({ error: pError });
+
+    if (!participants.length) return res.json([]);
+
+    const finalData = await Promise.all(
+      participants.map(async (p) => {
+        const { data: conv } = await supabase
+          .from("conversation_results")
+          .select("*")
+          .eq("participant_id", p.participant_id)
+          .order("last_updated", { ascending: false })
+          .limit(1);
+
+        const { data: upload } = await supabase
+          .from("uploads")
+          .select("*")
+          .eq("participant_id", p.participant_id)
+          .limit(1);
+
+        return {
+          id: p.participant_id,
+          fullName: p.full_name,
+          phoneNumber: p.phone_number,
+          timestamp: conv?.[0]?.last_updated || p.uploaded_at,
+          rsvpStatus: conv?.[0]?.rsvp_status || "Pending",
+          numberOfGuests: conv?.[0]?.number_of_guests || 0,
+          notes: conv?.[0]?.notes || "-",
+          callStatus: conv?.[0]?.call_status || "Pending",
+          proofUploaded: !!upload?.[0],
+          documentUpload: upload?.[0] || null,
+          eventName: p.event_id, // Optional: You can JOIN event name also
+        };
+      })
+    );
+
+    res.json(finalData);
+
+  } catch (err) {
+    console.error("Fetch error:", err);
+    res.status(500).json({ error: "Server Error" });
+  }
+};
+
+// GET /api/events/:eventId/dashboard
+export const getDashboardData = async (req, res) => {
+  try {
+    const eventId = req.params.eventId;
+
+    const { data, error } = await supabase
+      .from("conversation_results")
+      .select("result_id")
+      .eq("event_id", eventId);
+
+    if (error) throw error;
+
+    res.json({
+      event_id: eventId,
+      conversations: data || []
+    });
+    
+  } catch (err) {
+    console.error("Dashboard fetch error:", err);
+    res.status(500).json({ error: "Failed to fetch dashboard data" });
+  }
+};
+
+
+// GET /api/uploads/:participantId
+export const getUploadsForParticipant = async (req, res) => {
+  const { participantId } = req.params;
+
+  const { data, error } = await supabase
+    .from("uploads")
+    .select("*")
+    .eq("participant_id", participantId);
+
+  if (error) return res.status(500).json({ error });
+
+  res.json(data);
+};
+
 
 
 

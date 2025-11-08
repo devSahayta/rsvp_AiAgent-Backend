@@ -13,7 +13,7 @@ import { authenticateUser } from "./middleware/authMiddleware.js";
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json());  
 
 // CORS: allow your frontend origin(s)
 app.use(cors({

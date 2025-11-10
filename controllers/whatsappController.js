@@ -1,6 +1,6 @@
 // controllers/whatsappController.js
 import groq from "../utils/groqClient.js";
-import { sendWhatsAppMessage, sendWhatsAppTextMessage } from "../utils/whatsappClient.js";
+import { sendWhatsAppMessage, sendWhatsAppTextMessage,sendInitialTemplateMessage} from "../utils/whatsappClient.js";
 import { supabase } from "../config/supabase.js";
 import axios from "axios";
 import dotenv from "dotenv";
@@ -1070,3 +1070,54 @@ Let's start with the primary attendee. What is the full name as it appears on th
     return res.sendStatus(500);
   }
 };
+
+export const startInitialMessage = async (req, res) => {
+  try {
+    const { event_id } = req.body;
+
+    if (!event_id) {
+      return res.status(400).json({ error: "Event ID is required" });
+    }
+
+    const { data: participants, error } = await supabase
+      .from("participants")
+      .select("full_name, phone_number")
+      .eq("event_id", event_id);
+
+    if (error) throw error;
+
+    for (const person of participants) {
+      let phone = person.phone_number.toString().trim();
+      if (!phone.startsWith("91")) {
+        phone = "91" + phone;
+      }
+
+      console.log("📩 Sending Initial Message to =>", phone, person.full_name);
+
+      const templateComponents = [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: person.full_name || "Guest" }
+          ]
+        }
+      ];
+
+      await sendInitialTemplateMessage(
+        phone,
+        "rsvp_initial_message",
+        templateComponents
+      );
+    }
+
+    return res.json({
+      success: true,
+      message: "✅ Initial messages triggered successfully!"
+    });
+
+  } catch (err) {
+    console.error("❌ WhatsApp Send Error:", err.response?.data || err);
+    return res.status(500).json({ error: "WhatsApp send failed" });
+  }
+};
+

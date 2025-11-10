@@ -5,6 +5,37 @@ dotenv.config();
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_TOKEN;
 const WHATSAPP_PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
+// ✅ NEW FUNCTION — For Initial Template Messages
+export const sendInitialTemplateMessage = async (to, templateName, components) => {
+  try {
+    const res = await axios.post(
+      `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: "en_US" },
+          components: components,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log(`✅ Message sent to ${to}`, res.data);
+    return res.data;
+
+  } catch (err) {
+    console.error(`❌ WhatsApp send error for ${to}:`, err.response?.data || err.message);
+    throw err;
+  }
+};
 
 export const sendWhatsAppMessage = async (to, participantName = null) => {
   try {

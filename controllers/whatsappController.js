@@ -196,7 +196,9 @@ async function ensureCache(participant) {
 // MAIN MESSAGE HANDLER
 // -----------------------------
 export const handleIncomingMessage = async (req, res) => {
+  console.log("🔹 FULL WHATSAPP PAYLOAD:", JSON.stringify(req.body, null, 2));
   try {
+    
     const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!message) return res.sendStatus(200);
 
@@ -206,51 +208,101 @@ export const handleIncomingMessage = async (req, res) => {
 
     console.log("📩 Incoming:", { from, incomingType, preview: (userText || "").slice(0,180) });
 
-    // -------------------- BUTTON HANDLING --------------------
-    if ((incomingType === "interactive" && message.interactive?.type === "button_reply") || incomingType === "button") {
-      let buttonId = null;
-      let buttonText = null;
+   // -------------------- BUTTON HANDLING --------------------
+if (incomingType === "button") {
 
-      if (incomingType === "interactive") {
-        buttonId = message.interactive.button_reply.id;
-        buttonText = message.interactive.button_reply.title;
-      } else if (incomingType === "button") {
-        buttonId = message.button?.id;
-        buttonText = message.button?.text;
-      }
+  const buttonPayload = message?.button?.payload || message?.button?.text;
+  const buttonText = message?.button?.text;
 
-      // Handle your specific button
-      if (buttonId === "ADD_DOC_FOR_SELF" || buttonText === "Add Document for Myself") {
-        // Load participant cache first
-        const { data: participant } = await supabase
-          .from("participants")
-          .select("*")
-          .eq("phone_number", from)
-          .maybeSingle();
+  console.log("✅ Button Triggered:", buttonPayload, buttonText);
 
-        if (!participant) {
-          console.warn("⚠️ Participant not found for phone:", from);
-          return res.sendStatus(200);
-        }
+  // ✅ Normalize
+  const normalizedPayload = buttonPayload?.toUpperCase()?.replace(/\s+/g, "_");
 
-        const pid = participant.participant_id;
-        let cache = await ensureCache(participant);
+  // Load participant
+  const { data: participant } = await supabase
+    .from("participants")
+    .select("*")
+    .eq("phone_number", from)
+    .maybeSingle();
 
-        cache.call_status = "awaiting_additional_attendee_name";
-        cache.currentDoc = null;
-        cache.pendingDocs = cache.pendingDocs || [];
-        cache.lastUpdated = new Date();
-        convoCache.set(pid, cache);
+  if (!participant) {
+    console.warn("⚠️ Participant not found for phone:", from);
+    return res.sendStatus(200);
+  }
 
-        await supabase.from("conversation_results").update({
-          call_status: "awaiting_additional_attendee_name",
-          last_updated: new Date().toISOString()
-        }).eq("participant_id", pid);
+  const pid = participant.participant_id;
+  const displayName = participant.full_name?.trim() || "Guest";
+  let cache = await ensureCache(participant);
 
-        await sendWhatsAppTextMessage(from, `Sure. Who is the first person you'd like to upload a document for? Please provide their full name as on the document.`);
-        return res.sendStatus(200);
-      }
-    }
+  // ✅ Case 1: Add Document for Myself
+  if (normalizedPayload === "ADD_DOCUMENT_FOR_MYSELF") {
+    cache.call_status = "awaiting_additional_attendee_name";
+    cache.currentDoc = null;
+    cache.pendingDocs = cache.pendingDocs || [];
+    cache.lastUpdated = new Date();
+    convoCache.set(pid, cache);
+
+    await supabase.from("conversation_results").update({
+      call_status: "awaiting_additional_attendee_name",
+      last_updated: new Date().toISOString()
+    }).eq("participant_id", pid);
+
+    await sendWhatsAppTextMessage(from,
+      `Sure. Who is the first person you'd like to upload a document for?`
+    );
+    return res.sendStatus(200);
+  }
+
+  // ✅ Case 2: Wrong response record
+  if (normalizedPayload === "WRONG_RESPONSE_RECORD") {
+    cache.call_status = "confirm_rsvp_update";
+    cache.lastUpdated = new Date();
+    convoCache.set(pid, cache);
+
+    await supabase.from("conversation_results").update({
+      call_status: "confirm_rsvp_update",
+      last_updated: new Date().toISOString()
+    }).eq("participant_id", pid);
+
+    await sendWhatsAppTextMessage(from,
+      `${displayName}, it seems the recorded RSVP might be incorrect.\nWould you like to update your RSVP? Reply Yes or No.`
+    );
+    return res.sendStatus(200);
+  }
+
+  // ✅ Case 3: I changed my mind (support all variations)
+if (
+  normalizedPayload === "I_CHANGE_MY_MIND" ||
+  normalizedPayload === "I_CHANGED_MY_MIND" ||
+  normalizedPayload === "CHANGE_MY_MIND"
+) {
+  await supabase.from("conversation_results").update({
+    rsvp_status: null,
+    number_of_guests: null,
+    notes: null,
+    call_status: "awaiting_rsvp",
+    last_updated: new Date().toISOString()
+  }).eq("participant_id", pid);
+
+  convoCache.set(pid, {
+    call_status: "awaiting_rsvp",
+    currentDoc: null,
+    pendingDocs: [],
+    lastUpdated: new Date()
+  });
+
+  await sendWhatsAppTextMessage(from,
+    `Alright ${displayName}, let's update your RSVP.\nWill you attend the event? Reply Yes / No / Maybe.`
+  );
+  return res.sendStatus(200);
+}
+
+  return res.sendStatus(200);
+}
+
+
+
 
 
     // find participant
@@ -300,6 +352,67 @@ export const handleIncomingMessage = async (req, res) => {
       await sendWhatsAppTextMessage(from, `Certainly ${displayName}. I will help you update your RSVP. Will you attend on ${WEDDING.date}? Reply Yes / No / Maybe.`);
       return res.sendStatus(200);
     }
+
+    // Detect when user says RSVP info is wrong
+if (/(wrong|incorrect|mistake|not right|change it|modify|update rsvp|wrong response)/i.test(userText)) {
+  await sendWhatsAppTextMessage(from,
+    `${displayName}, it seems the recorded RSVP might be incorrect.\nWould you like to update your RSVP details?\nReply Yes or No.`
+  );
+
+  cache.call_status = "confirm_rsvp_update";
+  cache.lastUpdated = new Date();
+  convoCache.set(pid, cache);
+
+  await supabase.from("conversation_results").update({
+    call_status: "confirm_rsvp_update",
+    last_updated: new Date().toISOString()
+  }).eq("participant_id", pid);
+
+  return res.sendStatus(200);
+}
+
+if (callStatus === "confirm_rsvp_update") {
+  const intent = detectQuickIntent(userText);
+
+  if (intent === "Yes") {
+    await supabase.from("conversation_results").update({
+      rsvp_status: null,
+      number_of_guests: null,
+      notes: null,
+      call_status: "awaiting_rsvp",
+      last_updated: new Date().toISOString()
+    }).eq("participant_id", pid);
+
+    convoCache.set(pid, {
+      call_status: "awaiting_rsvp",
+      currentDoc: null,
+      pendingDocs: [],
+      lastUpdated: new Date(),
+      event_id: eventId
+    });
+
+    await sendWhatsAppTextMessage(from,
+      `Sure ${displayName}, Great.let's update your RSVP.\nWill you attend on ${WEDDING.date}? Reply Yes / No / Maybe.`
+    );
+    return res.sendStatus(200);
+  }
+
+  if (intent === "No") {
+    await sendWhatsAppTextMessage(from,
+      `No problem ${displayName} .We can continue from where we left off.\nIf you need to update later, reply "Update".`
+    );
+
+    // Restore previous state or continue doc flow
+    cache.call_status = convo.call_status;
+    convoCache.set(pid, cache);
+
+    return res.sendStatus(200);
+  }
+
+  await sendWhatsAppTextMessage(from, `Please reply Yes or No.`);
+  return res.sendStatus(200);
+}
+
 
     // If non-text and not in upload state => prompt text
     if (incomingType !== "text" && incomingType !== "interactive") {

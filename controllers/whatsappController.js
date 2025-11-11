@@ -110,6 +110,19 @@ If guests ask:
 - “What should I wear?” → Provide dress code
 - “Show full schedule” → Show bullet points above
 
+
+If guests ask about dress code:
+- If they mention a specific event → provide only that event’s dress code
+- If the event has no dress code → reply: “No specific dress code mentioned”
+- If they ask generally like “What should I wear?” or “Any dress code?” →
+  Provide a full friendly breakdown:
+
+  Dress Code Breakdown:
+${WEDDING.events.map(e =>
+`• ${e.title} (${e.date})
+  ${e.dress_code ? e.dress_code : "No specific dress code mentioned"}`
+).join("\n")}
+
 Do not hallucinate. Stick to this information strictly.
 `;
 

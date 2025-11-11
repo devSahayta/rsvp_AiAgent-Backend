@@ -23,8 +23,9 @@ const WEDDING = {
   groom_mother: "Dr. Simmi Mahesh",
 
   venue: "Caravela Beach Resort, Varca, Salcete, Goa",
+  location_link:"https://maps.app.goo.gl/H7rGaz6Wt19uoMg1A",
   checkin: "20th December 2025",
-  wedding_dates: "20th & 21st December 2025",
+  date: "20th & 21st December 2025",
   checkout: "22nd December 2025",
 
   events: [

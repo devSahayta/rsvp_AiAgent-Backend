@@ -15,21 +15,103 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || "";
 // Wedding info
 // -----------------------------
 const WEDDING = {
-  date: "January 25, 2026",
-  venue: "Grand Palace Convention Hall",
-  location_link: "https://maps.google.com/?q=Grand+Palace",
-  dress_code: "Traditional / Formal",
-  couple_names: "Arshia & Aditya",
-  food_info: "A delightful mix of vegetarian and non-vegetarian dishes"
+  bride_name: "Arshia Arya",
+  bride_father: "Ashish Prakash Arya",
+  bride_mother: "Barkha Arya",
+  groom_name: "Aditya Lahiri",
+  groom_father: "Devashish Lahiri",
+  groom_mother: "Dr. Simmi Mahesh",
+
+  venue: "Caravela Beach Resort, Varca, Salcete, Goa",
+  checkin: "20th December 2025",
+  wedding_dates: "20th & 21st December 2025",
+  checkout: "22nd December 2025",
+
+  events: [
+    {
+      date: "20th December 2025",
+      title: "Welcome Lunch + Mehendi",
+      venue: "Varca Ballroom",
+      time: "1:00 PM onwards",
+      dress_code: "Floral & Festive",
+      extra: "High-Tea at 5 PM"
+    },
+    {
+      date: "20th December 2025",
+      title: "Sangeet",
+      venue: "New Lawns",
+      time: "6:30 PM onwards"
+    },
+    {
+      date: "21st December 2025",
+      title: "Haldi + Carnival",
+      venue: "Coconut Grove",
+      time: "11:00 AM onwards",
+      dress_code: "Tropical Vibes",
+      extra: "Lunch at 1 PM onwards"
+    },
+    {
+      date: "21st December 2025",
+      title: "Sundowner Wedding",
+      venue: "Beach Lawn",
+      baraat: "4:00 PM",
+      time: "5:00 PM onwards",
+      dress_code: "Pastel Elegance"
+    },
+    {
+      date: "20th December 2025",
+      title: "After Party",
+      venue: "Varca Ballroom",
+      time: "10:30 PM onwards"
+    }
+  ]
 };
+
 
 // -----------------------------
 // System prompt
 // -----------------------------
+// -----------------------------
+// System prompt
+// -----------------------------
 const systemPrompt = `
-You are a formal, helpful WhatsApp assistant that ONLY helps with RSVPs and wedding-related information
-for the wedding of ${WEDDING.couple_names}.
+You are an exceptionally helpful and polite WhatsApp RSVP assistant for the wedding of
+${WEDDING.bride_name} and ${WEDDING.groom_name}.
+
+Your job:
+✅ Help guests RSVP and manage their details
+✅ Provide event schedule, timing, venue, dress code
+✅ Provide bride/groom + parents names when asked
+✅ Share check-in & checkout dates
+✅ If guest asks something unrelated → politely redirect back to the wedding
+
+Rules:
+- Keep responses short, clear, and warm
+- Answer ONLY based on the provided wedding details
+- If something is unclear, ask a friendly follow-up question
+
+Wedding Details (use for knowledge):
+• Couple: ${WEDDING.bride_name} (D/O ${WEDDING.bride_father} & ${WEDDING.bride_mother})
+          & ${WEDDING.groom_name} (S/O ${WEDDING.groom_father} & ${WEDDING.groom_mother})
+• Venue: ${WEDDING.venue}
+• Dates: ${WEDDING.wedding_dates} (Checkout: ${WEDDING.checkout})
+
+Event Schedule:
+${WEDDING.events.map(e =>
+`- ${e.date}: ${e.title} @ ${e.venue}
+  Time: ${e.baraat ? e.baraat + " (Baraat), " : ""}${e.time}
+  ${e.dress_code ? "Dress Code: " + e.dress_code : ""}${e.extra ? " — " + e.extra : ""}`
+).join("\n")}
+
+If guests ask:
+- “When is ___?” → Provide date & time
+- “Where is ___?” → Provide venue
+- “What should I wear?” → Provide dress code
+- “Show full schedule” → Show bullet points above
+
+Do not hallucinate. Stick to this information strictly.
 `;
+
 
 // -----------------------------
 // Heuristics / helpers

@@ -4,18 +4,20 @@ import { createUser, getAllUsers, getUserById } from "../models/userModel.js";
 // Create a new user
 export const addUser = async (req, res) => {
   try {
-    const { user_id, name, email } = req.body;
+   const { user_id, name, email, credits } = req.body;
 
-    if (!user_id || !name || !email) {
-      return res.status(400).json({ error: "All fields are required" });
-    }
+if (!user_id || !name || !email) {
+  return res.status(400).json({ error: "All fields are required" });
+}
 
-    const newUser = await createUser({
-      user_id,
-      name,
-      email,
-      created_at: new Date().toISOString(),
-    });
+const newUser = await createUser({
+  user_id,
+  name,
+  email,
+  credits: credits ?? 100, // ✅ Use provided credits or default 100
+  created_at: new Date().toISOString(),
+});
+
 
     res.status(201).json({ message: "User created successfully", user: newUser });
   } catch (error) {

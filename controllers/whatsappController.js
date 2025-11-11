@@ -95,7 +95,7 @@ Wedding Details (use for knowledge):
 • Couple: ${WEDDING.bride_name} (D/O ${WEDDING.bride_father} & ${WEDDING.bride_mother})
           & ${WEDDING.groom_name} (S/O ${WEDDING.groom_father} & ${WEDDING.groom_mother})
 • Venue: ${WEDDING.venue}
-• Dates: ${WEDDING.wedding_dates} (Checkout: ${WEDDING.checkout})
+• Dates: ${WEDDING.date} (Checkout: ${WEDDING.checkout})
 
 Event Schedule:
 ${WEDDING.events.map(e =>

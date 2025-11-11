@@ -756,20 +756,24 @@ Let's start with the primary attendee. What is the full name as it appears on th
           role: cache.currentDoc.role || "Self",
           created_at: new Date().toISOString()
         });
-
-        cache.currentDoc.hasTravelDoc = true;
-        
-        cache.call_status = "awaiting_more_travel_docs";
-        cache.lastUpdated = new Date();
-        convoCache.set(pid, cache);
+cache.currentDoc.hasTravelDoc = true;       
+cache.pendingDocs = cache.pendingDocs || [];
+cache.pendingDocs.push({ ...cache.currentDoc });
+cache.currentDoc = null;
+cache.call_status = "awaiting_more_attendees";
+cache.lastUpdated = new Date();
+convoCache.set(pid, cache);
 
         await supabase.from("conversation_results").update({
-          call_status: "awaiting_more_travel_docs",
-          last_updated: new Date().toISOString()
-        }).eq("participant_id", pid);
+  call_status: "awaiting_more_attendees",
+  last_updated: new Date().toISOString()
+}).eq("participant_id", pid);
 
-        await sendWhatsAppTextMessage(from, `✅ ${cache.currentDoc.travelDocType} uploaded successfully!\n\nWould you like to upload another travel document? Reply Yes or No.`);
-        return res.sendStatus(200);
+await sendWhatsAppTextMessage(from,
+  `✅ ${cache.pendingDocs[cache.pendingDocs.length - 1].name}'s travel document is uploaded!\n\nWould you like to add documents for another attendee? Reply Yes or No.`
+);
+
+  return res.sendStatus(200); // ✅ REQUIRED to prevent double message 🔥
 
       } catch (err) {
         console.error("❌ Travel doc upload error:", err);

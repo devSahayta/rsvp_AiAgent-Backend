@@ -244,7 +244,8 @@ export const sendBatchInitialMessage = async (req, res) => {
     for (const p of participants) {
       const name = p.full_name?.trim() || "Guest";
       const msg = `Hello ${name},\nThis is ${WEDDING.couple_names}'s wedding RSVP assistant. Are you planning to attend on ${WEDDING.date}? Reply Yes / No / Maybe.`;
-      await sendWhatsAppMessage(p.phone_number, msg);
+      await sendWhatsAppMessage(p.phone_number, p.full_name);
+
       await supabase.from("conversation_results").upsert({
         participant_id: p.participant_id,
         event_id: p.event_id,

@@ -125,8 +125,6 @@ ${WEDDING.events.map(e =>
 
 Do not hallucinate. Stick to this information strictly.
 `;
-
-
 // -----------------------------
 // Heuristics / helpers
 // -----------------------------
@@ -230,40 +228,122 @@ export const verifyWebhook = (req, res) => {
   return res.sendStatus(403);
 };
 
-// -----------------------------
-// send batch initial messages
-// -----------------------------
+// Update your sendBatchInitialMessage function in whatsappController.js
+
 export const sendBatchInitialMessage = async (req, res) => {
   try {
-    const { event_id } = req.body;
+    const { event_id, filter_null_rsvp } = req.body;
+    
     if (!event_id) return res.status(400).json({ error: "event_id required" });
 
-    const { data: participants } = await supabase.from("participants").select("*").eq("event_id", event_id);
-    if (!participants?.length) return res.status(404).json({ error: "No participants found" });
+    console.log(`📋 Fetching participants for event: ${event_id}`);
+    console.log(`🔍 Filter NULL RSVP: ${filter_null_rsvp ? 'Yes' : 'No'}`);
 
-    for (const p of participants) {
-      const name = p.full_name?.trim() || "Guest";
-      const msg = `Hello ${name},\nThis is ${WEDDING.couple_names}'s wedding RSVP assistant. Are you planning to attend on ${WEDDING.date}? Reply Yes / No / Maybe.`;
-      await sendWhatsAppMessage(p.phone_number, p.full_name);
+    // Fetch participants for the event
+    const { data: participants, error: participantsError } = await supabase
+      .from("participants")
+      .select("*")
+      .eq("event_id", event_id);
 
-      await supabase.from("conversation_results").upsert({
-        participant_id: p.participant_id,
-        event_id: p.event_id,
-        call_status: "awaiting_rsvp",
-        last_updated: new Date().toISOString()
-      }, { onConflict: "participant_id" });
-      convoCache.set(p.participant_id, { 
-        call_status: "awaiting_rsvp", 
-        currentDoc: null, 
-        pendingDocs: [], 
-        lastUpdated: new Date(), 
-        event_id: p.event_id 
+    if (participantsError) {
+      console.error("❌ Error fetching participants:", participantsError);
+      return res.status(500).json({ error: "Failed to fetch participants" });
+    }
+
+    if (!participants || participants.length === 0) {
+      return res.status(404).json({ error: "No participants found" });
+    }
+
+    console.log(`👥 Total participants: ${participants.length}`);
+
+    // If filter_null_rsvp is true, only send to participants with NULL RSVP status
+    let targetParticipants = participants;
+    
+    if (filter_null_rsvp) {
+      // Fetch conversation results to check RSVP status
+      const { data: conversations, error: conversationError } = await supabase
+        .from("conversation_results")
+        .select("participant_id, rsvp_status")
+        .eq("event_id", event_id);
+
+      if (conversationError) {
+        console.error("❌ Error fetching conversations:", conversationError);
+      }
+
+      // Create a map of participant_id -> rsvp_status
+      const rsvpMap = new Map();
+      if (conversations) {
+        conversations.forEach(conv => {
+          rsvpMap.set(conv.participant_id, conv.rsvp_status);
+        });
+      }
+
+      // Filter participants who have NULL or no RSVP status
+      targetParticipants = participants.filter(p => {
+        const rsvpStatus = rsvpMap.get(p.participant_id);
+        // Include if: no conversation record, or RSVP status is null/undefined/empty
+        return !rsvpStatus || rsvpStatus === null || rsvpStatus === "";
+      });
+
+      console.log(`🎯 Filtered to ${targetParticipants.length} participants with NULL RSVP`);
+    }
+
+    if (targetParticipants.length === 0) {
+      return res.status(200).json({ 
+        message: "No participants need messages",
+        sent_count: 0 
       });
     }
-    res.json({ message: "✅ Batch messages sent" });
+
+    // Send messages to target participants
+    let successCount = 0;
+    let failCount = 0;
+
+    for (const p of targetParticipants) {
+      try {
+        const name = p.full_name?.trim() || "Guest";
+        const msg = `Hello ${name},\nThis is ${WEDDING.couple_names}'s wedding RSVP assistant. Are you planning to attend on ${WEDDING.date}? Reply Yes / No / Maybe.`;
+        
+        await sendWhatsAppMessage(p.phone_number, msg);
+        
+        // Ensure conversation record exists
+        await supabase.from("conversation_results").upsert({
+          participant_id: p.participant_id,
+          event_id: p.event_id,
+          call_status: "awaiting_rsvp",
+          last_updated: new Date().toISOString()
+        }, { onConflict: "participant_id" });
+        
+        // Initialize cache
+        convoCache.set(p.participant_id, { 
+          call_status: "awaiting_rsvp", 
+          currentDoc: null, 
+          pendingDocs: [], 
+          lastUpdated: new Date(), 
+          event_id: p.event_id 
+        });
+
+        successCount++;
+        console.log(`✅ Sent message to ${name} (${p.phone_number})`);
+      } catch (err) {
+        failCount++;
+        console.error(`❌ Failed to send message to ${p.phone_number}:`, err);
+      }
+    }
+
+    console.log(`📊 Results: ${successCount} sent, ${failCount} failed`);
+
+    res.json({ 
+      message: "✅ Batch messages sent",
+      total_targeted: targetParticipants.length,
+      sent_count: successCount,
+      failed_count: failCount,
+      filtered_by_null_rsvp: filter_null_rsvp || false
+    });
+    
   } catch (err) {
     console.error("❌ Batch error:", err);
-    res.sendStatus(500);
+    res.status(500).json({ error: "Failed to send batch messages" });
   }
 };
 

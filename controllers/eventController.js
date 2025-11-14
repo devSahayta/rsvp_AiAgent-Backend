@@ -557,7 +557,7 @@ export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // ✅ 1. Fetch event to get batch_id
+    // 1. Fetch event to get batch_id
     const { data: eventData, error: eventError } = await supabase
       .from("events")
       .select("batch_id")
@@ -570,7 +570,7 @@ export const syncBatchStatuses = async (req, res) => {
 
     const batchId = eventData.batch_id;
 
-    // ✅ 2. Fetch ElevenLabs batch details
+    // 2. Fetch ElevenLabs batch details
     const elevenResponse = await fetch(
       `https://api.elevenlabs.io/v1/convai/batch-calling/${batchId}`,
       {
@@ -585,14 +585,17 @@ export const syncBatchStatuses = async (req, res) => {
 
     if (!elevenResponse.ok) {
       console.error("ElevenLabs API error:", batchData);
-      return res.status(500).json({ error: "Failed to fetch batch details", details: batchData });
+      return res.status(500).json({
+        error: "Failed to fetch batch details",
+        details: batchData,
+      });
     }
 
     const recipients = batchData.recipients || [];
     if (recipients.length === 0)
       return res.status(400).json({ error: "No recipients found in batch" });
 
-    // ✅ 3. Fetch all participants for the event
+    // 3. Fetch all participants for the event
     const { data: participants, error: partError } = await supabase
       .from("participants")
       .select("participant_id, phone_number")
@@ -600,25 +603,55 @@ export const syncBatchStatuses = async (req, res) => {
 
     if (partError) throw partError;
 
-    // ✅ 4. Map recipients to participants via phone number
+    // 🚫 Chatbot-managed protected call statuses (DO NOT OVERWRITE)
+    const protectedStatuses = [
+      "awaiting_rsvp",
+      "awaiting_additional_attendee_name",
+      "awaiting_id_proof",
+      "awaiting_travel_doc_upload",
+      "awaiting_guest_count",
+      "awaiting_notes",
+      "awaiting_doc_role",
+      "awaiting_travel_docs_choice",
+      "awaiting_travel_doc_type",
+      "awaiting_arrival_info",
+      "awaiting_more_attendees",
+      "awaiting_more_travel_docs",
+      "completed"
+    ];
+
+    // 4. Map recipients to participants via phone number
     let updatedCount = 0;
+
     for (const recipient of recipients) {
       const participant = participants.find(
         (p) => p.phone_number === recipient.phone_number
       );
 
-      if (participant) {
-        // ✅ Update conversation_results.call_status
-        const { error: updateError } = await supabase
-          .from("conversation_results")
-          .update({ call_status: recipient.status })
-          .eq("participant_id", participant.participant_id);
+      if (!participant) continue;
 
-        if (!updateError) updatedCount++;
+      // Fetch current stored status
+      const { data: existing } = await supabase
+        .from("conversation_results")
+        .select("call_status")
+        .eq("participant_id", participant.participant_id)
+        .maybeSingle();
+
+      // 🚫 If Chatbot controls this state → do NOT overwrite
+      if (protectedStatuses.includes(existing?.call_status)) {
+        continue;
       }
+
+      // ✅ Safe to update with ElevenLabs status
+      const { error: updateError } = await supabase
+        .from("conversation_results")
+        .update({ call_status: recipient.status })
+        .eq("participant_id", participant.participant_id);
+
+      if (!updateError) updatedCount++;
     }
 
-    // ✅ 5. Also update batch_status in events
+    // 5. Update batch_status in events
     await supabase
       .from("events")
       .update({ batch_status: batchData.status })
@@ -630,11 +663,13 @@ export const syncBatchStatuses = async (req, res) => {
       total: recipients.length,
       batch_status: batchData.status,
     });
+
   } catch (err) {
     console.error("syncBatchStatuses error:", err);
     return res.status(500).json({ error: "Failed to sync batch statuses" });
   }
 };
+
 
 export const getBatchStatus = async (req, res) => {
   try {

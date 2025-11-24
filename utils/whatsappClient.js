@@ -105,3 +105,17 @@ export const sendWhatsAppTextMessage = async (to, message) => {
   }
 };
 
+export async function fetchMediaUrl(mediaId) {
+  const token = process.env.WHATSAPP_TOKEN;
+  const url = `https://graph.facebook.com/v17.0/${mediaId}`;
+  try {
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    // resp.data contains { id, mime_type, url, ... }
+    return resp.data.url; // this is the public temporary URL
+  } catch (err) {
+    console.error("❌ fetchMediaUrl error:", err.response?.data || err.message);
+    return null;
+  }
+}

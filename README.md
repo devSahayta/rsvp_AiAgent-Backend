@@ -22,34 +22,7 @@ A comprehensive backend API for managing RSVP events with AI-powered voice calli
 - **File Processing**: Multer, Fast-CSV
 - **HTTP Client**: Axios
 
-## 📁 Project Structure
 
-```text
-RSVP_AI_AGENT-Backend/
-├─ app.js
-├─ package.json
-├─ package-lock.json
-├─ .gitignore
-├─ config/
-│  └─ supabase.js
-├─ controllers/
-│  ├─ creditController.js
-│  ├─ eventController.js
-│  ├─ uploadController.js
-│  └─ userController.js
-├─ models/
-│  ├─ conversationModel.js
-│  ├─ eventModel.js
-│  └─ userModel.js
-├─ routes/
-│  ├─ creditRoutes.js
-│  ├─ eventRoutes.js
-│  ├─ uploadRoutes.js
-│  └─ userRoutes.js
-├─ utils/
-│  └─ elevenlabsApi.js
-└─ node_modules/
-```
 
 ## 📋 Prerequisites
 
@@ -352,16 +325,18 @@ Content-Type: application/json
 
 ### Conversation Results Table
 ```sql
-- conversation_id (text)
+- result_id (text)
 - participant_id (uuid, foreign key)
+-upload_id
 - event_id (uuid, foreign key)
 - call_status (text)
 - rsvp_status (text)
 - number_of_guests (integer)
 - notes (text)
 - call_duration (integer, seconds)
-- proof_uploaded (boolean)
-- document_url (text)
+- proof_uploaded (boolean),
+- conversation_id
+-call_duration
 - last_updated (timestamp)
 ```
 

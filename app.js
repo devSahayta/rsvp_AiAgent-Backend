@@ -9,6 +9,7 @@ import creditRoutes from "./routes/creditRoutes.js";
 import whatsappRoutes from "./routes/whatsappRoutes.js";
 import { extractKindeUser } from "./middleware/extractKindeUser.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
+import chatRoutes from "./routes/chatRoutes.js";
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ app.use("/api/uploads", authenticateUser, uploadRoutes);
 
 app.use("/api/credits", creditRoutes);
 app.use("/", whatsappRoutes);
+app.use("/api", chatRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

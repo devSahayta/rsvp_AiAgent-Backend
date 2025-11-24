@@ -11,6 +11,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.69.0",
     "@elevenlabs/elevenlabs-js": "^2.13.0",
     "@fast-csv/parse": "^5.0.5",
     "@kinde-oss/kinde-node-express": "^1.6.0",

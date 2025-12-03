@@ -21,10 +21,12 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "form-data": "^4.0.5",
     "groq-sdk": "^0.34.0",
     "jose": "^6.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.2",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "uuid": "^13.0.0"
   }
 }

@@ -49,7 +49,7 @@ router.get("/chats/:chatId/messages", async (req, res) => {
 router.post("/chats/:chatId/messages", async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { sender_type = "admin", message = "", message_type = "text", media_path = null } = req.body;
+    const { sender_type = "admin", message = "", message_type = "text", media_path = "null" } = req.body;
 
     const row = await chatCtrl.saveMessage({
       chat_id: chatId,

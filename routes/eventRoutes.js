@@ -8,7 +8,6 @@ import {
    getEventRSVPData,
    getEventDetails,
    getConversationStatus,
-   
 
 } from "../controllers/eventController.js";
 

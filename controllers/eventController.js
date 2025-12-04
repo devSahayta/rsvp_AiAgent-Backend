@@ -706,3 +706,5 @@ export const getBatchStatus = async (req, res) => {
     return res.status(500).json({ error: "Failed to fetch batch status" });
   }
 };
+
+

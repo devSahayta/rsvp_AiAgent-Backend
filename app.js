@@ -10,18 +10,27 @@ import whatsappRoutes from "./routes/whatsappRoutes.js";
 import { extractKindeUser } from "./middleware/extractKindeUser.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
 import chatRoutes from "./routes/chatRoutes.js";
+<<<<<<< HEAD
 import travelItineraryRoutes from "./routes/travelItineraryRoutes.js";
+=======
+import whatsappTemplateRoutes from "./routes/whatsappTemplateRoutes.js";
+>>>>>>> 7c50a0da0c28ac795458edcc8d5a6a1bdf656f51
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());  
+app.use(express.json());
 
 // CORS: allow your frontend origin(s)
-app.use(cors({
-  origin: ["http://localhost:5173", "https://rsvp-ai-agent-frontend.vercel.app"],
-  credentials: true,
-}));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "https://rsvp-ai-agent-frontend.vercel.app",
+    ],
+    credentials: true,
+  })
+);
 
 // Always extract token (if present) so authenticateUser can rely on req.user
 app.use(extractKindeUser);
@@ -37,6 +46,9 @@ app.use("/api/credits", creditRoutes);
 app.use("/", whatsappRoutes);
 app.use("/api", chatRoutes);
 app.use("/api", travelItineraryRoutes);
+
+//route for whatapp template
+app.use("/api/watemplates", whatsappTemplateRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

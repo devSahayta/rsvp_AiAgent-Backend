@@ -12,14 +12,45 @@ dotenvConfig();
 import { extractTextFromPDFUrl } from "./pdfExtractor.js";
 
 
-// Resolve key file to absolute path
-const resolvedKeyPath = path.resolve(process.env.GOOGLE_CLOUD_VISION_KEY_PATH);
+// 📌 Robust Google Service Account Loading
+let visionClient;
 
-console.log("🔑 Google Vision Key Path:", resolvedKeyPath);
+try {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT environment variable is not set");
+  }
 
-const visionClient = new vision.ImageAnnotatorClient({
-  keyFilename: resolvedKeyPath
-});
+  // Parse the JSON
+  let googleCreds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  
+  // 🔐 CRITICAL: Fix private key newlines
+  if (googleCreds.private_key) {
+    // Replace escaped newlines with actual newlines
+    googleCreds.private_key = googleCreds.private_key.replace(/\\n/g, '\n');
+  }
+  
+  // Validate required fields
+  const requiredFields = ['type', 'project_id', 'private_key', 'client_email'];
+  const missingFields = requiredFields.filter(field => !googleCreds[field]);
+  
+  if (missingFields.length > 0) {
+    throw new Error(`Missing required fields in GOOGLE_SERVICE_ACCOUNT: ${missingFields.join(', ')}`);
+  }
+
+  // Initialize Vision Client
+  visionClient = new vision.ImageAnnotatorClient({
+    credentials: googleCreds
+  });
+  
+  console.log("✅ Google Vision API initialized successfully");
+  console.log(`📧 Using service account: ${googleCreds.client_email}`);
+  
+} catch (error) {
+  console.error("❌ Failed to initialize Google Vision API:", error.message);
+  console.error("💡 Make sure GOOGLE_SERVICE_ACCOUNT is set correctly in .env");
+  throw error;
+}
+
 
 // Initialize Claude client
 const anthropic = new Anthropic({

@@ -1,6 +1,7 @@
 # dependencies
 node_modules
 .env
+test-google-creds.js
 
 # logs
 npm-debug.log*

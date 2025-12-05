@@ -1,12 +1,49 @@
 // utils/pdfExtractor.js - PDF → Image → Text (Clean Approach)
+import { config as dotenvConfig } from "dotenv";
+dotenvConfig();
+
 import { PDFDocument } from 'pdf-lib';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas } from 'canvas';
 import vision from '@google-cloud/vision';
 
-const visionClient = new vision.ImageAnnotatorClient({
-  keyFilename: process.env.GOOGLE_CLOUD_VISION_KEY_PATH || process.env.GOOGLE_APPLICATION_CREDENTIALS
-});
+// 🔧 FIXED: Initialize Vision Client with JSON credentials from env
+let visionClient;
+
+try {
+  if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT environment variable is not set");
+  }
+
+  // Parse the JSON credentials
+  const googleCreds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  
+  // Fix private key newlines
+  if (googleCreds.private_key) {
+    googleCreds.private_key = googleCreds.private_key.replace(/\\n/g, '\n');
+  }
+  
+  // Validate required fields
+  const requiredFields = ['type', 'project_id', 'private_key', 'client_email'];
+  const missingFields = requiredFields.filter(field => !googleCreds[field]);
+  
+  if (missingFields.length > 0) {
+    throw new Error(`Missing required fields in GOOGLE_SERVICE_ACCOUNT: ${missingFields.join(', ')}`);
+  }
+
+  // Initialize Vision Client with credentials object
+  visionClient = new vision.ImageAnnotatorClient({
+    credentials: googleCreds
+  });
+  
+  console.log("✅ Google Vision API (PDF) initialized successfully");
+  console.log(`📧 Using service account: ${googleCreds.client_email}`);
+  
+} catch (error) {
+  console.error("❌ Failed to initialize Google Vision API (PDF):", error.message);
+  console.error("💡 Make sure GOOGLE_SERVICE_ACCOUNT is set correctly in .env");
+  throw error;
+}
 
 /**
  * Convert PDF first page to PNG image buffer

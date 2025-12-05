@@ -174,7 +174,7 @@ export async function getMessagesForChat({ chat_id, limit = 50, before = null })
     // Otherwise it's a storage path → create NEW signed URL
     const { data: signed } = await supabase.storage
       .from("participant-docs")
-      .createSignedUrl(msg.media_path, 60 * 60 * 24); // 24 hours
+      .createSignedUrl(msg.media_path, 60 * 60 * 24 * 365 * 10); // 10 years
 
     if (signed?.signedUrl) {
       msg.media_path = signed.signedUrl;

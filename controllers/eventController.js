@@ -55,7 +55,10 @@ export const createEventWithCsv = async (req, res) => {
     const key = `${user_id}/${Date.now()}_${slug(event_name)}.csv`;
     const upload = await supabase.storage
       .from("event-csvs")
-      .upload(key, file.buffer, { contentType: file.mimetype || "text/csv", upsert: false });
+      .upload(key, file.buffer, {
+        contentType: file.mimetype || "text/csv",
+        upsert: false,
+      });
 
     if (upload.error) {
       return res
@@ -63,7 +66,9 @@ export const createEventWithCsv = async (req, res) => {
         .json({ error: `Storage upload failed: ${upload.error.message}` });
     }
 
-    const { data: publicUrlData } = supabase.storage.from("event-csvs").getPublicUrl(key);
+    const { data: publicUrlData } = supabase.storage
+      .from("event-csvs")
+      .getPublicUrl(key);
     const uploaded_csv = publicUrlData.publicUrl;
 
     // 2) Create the event row
@@ -100,7 +105,12 @@ export const createEventWithCsv = async (req, res) => {
 
     // 4) Resolve column names (case-insensitive)
     const nameCol = findColumn(headers, ["name", "full_name", "fullname"]);
-    const phoneCol = findColumn(headers, ["phoneno", "phone", "phone_number", "mobile"]);
+    const phoneCol = findColumn(headers, [
+      "phoneno",
+      "phone",
+      "phone_number",
+      "mobile",
+    ]);
     const emailCol = findColumn(headers, ["email", "email_address"]); // email optional
 
     if (!nameCol || !phoneCol) {
@@ -200,14 +210,18 @@ export const getRSVPDataByEvent = async (req, res) => {
     const participantIds = participants.map((p) => p.participant_id);
     const { data: conversations, error: cError } = await supabase
       .from("conversation_results")
-      .select("participant_id, status, proof_uploaded, document_url, created_at")
+      .select(
+        "participant_id, status, proof_uploaded, document_url, created_at"
+      )
       .in("participant_id", participantIds);
 
     if (cError) throw cError;
 
     // 3️⃣ Merge participants + conversations
     const rsvpData = participants.map((p) => {
-      const convo = conversations.find((c) => c.participant_id === p.participant_id);
+      const convo = conversations.find(
+        (c) => c.participant_id === p.participant_id
+      );
 
       let status = "Pending";
       if (convo?.status === "yes") status = "Confirmed";
@@ -313,7 +327,6 @@ export const getEventRSVPData = async (req, res) => {
     );
 
     res.json(finalData);
-
   } catch (err) {
     console.error("Fetch error:", err);
     res.status(500).json({ error: "Server Error" });
@@ -334,15 +347,13 @@ export const getDashboardData = async (req, res) => {
 
     res.json({
       event_id: eventId,
-      conversations: data || []
+      conversations: data || [],
     });
-    
   } catch (err) {
     console.error("Dashboard fetch error:", err);
     res.status(500).json({ error: "Failed to fetch dashboard data" });
   }
 };
-
 
 // GET /api/uploads/:participantId
 export const getUploadsForParticipant = async (req, res) => {
@@ -357,9 +368,6 @@ export const getUploadsForParticipant = async (req, res) => {
 
   res.json(data);
 };
-
-
-
 
 export const triggerBatchCall = async (req, res) => {
   try {
@@ -386,7 +394,9 @@ export const triggerBatchCall = async (req, res) => {
     if (participantError) throw participantError;
 
     if (!participants || participants.length === 0) {
-      return res.status(400).json({ error: "No participants found for this event" });
+      return res
+        .status(400)
+        .json({ error: "No participants found for this event" });
     }
 
     // 3️⃣ Prepare recipients for ElevenLabs
@@ -424,7 +434,9 @@ export const triggerBatchCall = async (req, res) => {
 
     if (!response.ok) {
       console.error("❌ ElevenLabs API Error:", data);
-      return res.status(500).json({ error: "Batch call failed", details: data });
+      return res
+        .status(500)
+        .json({ error: "Batch call failed", details: data });
     }
 
     // 5️⃣ Update event with batch_id + status
@@ -455,17 +467,19 @@ export const triggerBatchCall = async (req, res) => {
       }
 
       if (!existing) {
-        const { error: insertError } = await supabase.from("conversation_results").insert([
-          {
-            participant_id: participant.participant_id,
-            event_id: eventId,
-            call_status: "pending", // Default
-            rsvp_status: null, // Default neutral state
-            number_of_guests: 0,
-            notes: null,
-            last_updated: new Date().toISOString(),
-          },
-        ]);
+        const { error: insertError } = await supabase
+          .from("conversation_results")
+          .insert([
+            {
+              participant_id: participant.participant_id,
+              event_id: eventId,
+              call_status: "pending", // Default
+              rsvp_status: null, // Default neutral state
+              number_of_guests: 0,
+              notes: null,
+              last_updated: new Date().toISOString(),
+            },
+          ]);
 
         if (insertError) {
           console.error(
@@ -480,7 +494,7 @@ export const triggerBatchCall = async (req, res) => {
     return res.status(200).json({
       message: "✅ Batch call started successfully & placeholders created",
       batch: data,
-       batch_id: data.id,
+      batch_id: data.id,
       recipients_count: participants.length,
     });
   } catch (err) {
@@ -488,7 +502,6 @@ export const triggerBatchCall = async (req, res) => {
     return res.status(500).json({ error: "Failed to trigger batch call" });
   }
 };
-
 
 export const retryBatchCall = async (req, res) => {
   try {
@@ -550,8 +563,6 @@ export const retryBatchCall = async (req, res) => {
     return res.status(500).json({ error: "Internal Server Error" });
   }
 };
-
-
 
 export const syncBatchStatuses = async (req, res) => {
   try {
@@ -617,7 +628,7 @@ export const syncBatchStatuses = async (req, res) => {
       "awaiting_arrival_info",
       "awaiting_more_attendees",
       "awaiting_more_travel_docs",
-      "completed"
+      "completed",
     ];
 
     // 4. Map recipients to participants via phone number
@@ -663,13 +674,11 @@ export const syncBatchStatuses = async (req, res) => {
       total: recipients.length,
       batch_status: batchData.status,
     });
-
   } catch (err) {
     console.error("syncBatchStatuses error:", err);
     return res.status(500).json({ error: "Failed to sync batch statuses" });
   }
 };
-
 
 export const getBatchStatus = async (req, res) => {
   try {
@@ -707,4 +716,38 @@ export const getBatchStatus = async (req, res) => {
   }
 };
 
+// GET all participants for a specific event
+export const getEventParticipants = async (req, res) => {
+  try {
+    const event_id = req.params.event_id;
+    const user_id = req.query.user_id; // ensure user owns the event
 
+    if (!event_id) {
+      return res.status(400).json({ error: "event_id is required" });
+    }
+
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id is required" });
+    }
+
+    // Fetch event + participants
+    const eventData = await getEventWithParticipants(event_id);
+
+    if (!eventData) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    // Validate this event belongs to the user
+    if (eventData.user_id !== user_id) {
+      return res.status(403).json({ error: "Unauthorized access to event" });
+    }
+
+    return res.json({
+      event: eventData,
+      participants: eventData.participants,
+    });
+  } catch (err) {
+    console.error("Error fetching event participants:", err);
+    res.status(500).json({ error: "Server error fetching participants" });
+  }
+};

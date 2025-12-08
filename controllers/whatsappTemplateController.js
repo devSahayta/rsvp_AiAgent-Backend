@@ -220,24 +220,132 @@ export async function listTemplates(req, res) {
   }
 }
 
+// export async function sendTemplate(req, res) {
+//   try {
+//     const wt_id = req.params.wt_id;
+//     const body = req.body;
+
+//     // 1. Load template row
+//     const { data: tpl, error: tplErr } = await supabase
+//       .from("whatsapp_templates")
+//       .select("*")
+//       .eq("wt_id", wt_id)
+//       .single();
+
+//     if (tplErr || !tpl) {
+//       return res.status(404).json({ error: "Template not found" });
+//     }
+
+//     // 2. Load WhatsApp account
+//     const user_id = body.user_id || tpl.user_id;
+//     const account = await getWhatsappAccount(user_id);
+//     if (!account)
+//       return res.status(400).json({ error: "WhatsApp account not found" });
+
+//     if (!account.system_user_access_token)
+//       return res
+//         .status(400)
+//         .json({ error: "Missing system_user_access_token" });
+
+//     if (!account.phone_number_id)
+//       return res.status(400).json({ error: "Missing phone_number_id" });
+
+//     // -------------------------------------------------------------
+//     // 3. Build components EXACTLY as Meta expects
+//     // -------------------------------------------------------------
+
+//     let finalComponents = [];
+
+//     // Case A: frontend provides exact components → use them
+//     if (body.components && Array.isArray(body.components)) {
+//       finalComponents = body.components;
+//     }
+
+//     // Case B: variables provided (for normal templates)
+//     else if (body.variables && Array.isArray(body.variables)) {
+//       finalComponents = [
+//         {
+//           type: "body",
+//           parameters: body.variables.map((v) => ({
+//             type: "text",
+//             text: v,
+//           })),
+//         },
+//       ];
+//     }
+
+//     // Case C: template is stored as media template (if nothing provided)
+//     else if (tpl.components && tpl.components.length > 0) {
+//       finalComponents = tpl.components;
+//     }
+
+//     // -------------------------------------------------------------
+//     // 4. Final message payload
+//     // -------------------------------------------------------------
+//     const messagePayload = {
+//       messaging_product: "whatsapp",
+//       to: body.to,
+//       type: "template",
+//       template: {
+//         name: tpl.name,
+//         language: { code: tpl.language || "en_US" },
+//         components: finalComponents,
+//       },
+//     };
+
+//     // -------------------------------------------------------------
+//     // 5. Send to Meta
+//     // -------------------------------------------------------------
+//     const sendResp = await wsService.sendTemplateMessage(
+//       account.phone_number_id,
+//       account.system_user_access_token,
+//       messagePayload
+//     );
+
+//     // -------------------------------------------------------------
+//     // 6. Log message
+//     // -------------------------------------------------------------
+//     const log = {
+//       wm_id: uuidv4(),
+//       account_id: account.wa_id,
+//       to_number: body.to,
+//       template_name: tpl.name,
+//       message_body: messagePayload,
+//       wa_message_id: sendResp?.messages?.[0]?.id || null,
+//       status: sendResp.error ? "FAILED" : "SENT",
+//     };
+
+//     await supabase.from("whatsapp_messages").insert(log);
+
+//     return res.json({ sendResp, log });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ error: err.response?.data || err.message });
+//   }
+// }
+
 export async function sendTemplate(req, res) {
   try {
-    const wt_id = req.params.wt_id;
-    const body = req.body;
+    const templateId = req.params.templateId;
+    const { user_id, to, components, variables } = req.body;
 
-    // 1. Load template row
-    const { data: tpl, error: tplErr } = await supabase
-      .from("whatsapp_templates")
-      .select("*")
-      .eq("wt_id", wt_id)
-      .single();
-
-    if (tplErr || !tpl) {
-      return res.status(404).json({ error: "Template not found" });
+    if (!templateId) {
+      return res.status(400).json({ error: "templateId is required" });
     }
 
-    // 2. Load WhatsApp account
-    const user_id = body.user_id || tpl.user_id;
+    if (!user_id) {
+      return res.status(400).json({ error: "user_id is required" });
+    }
+
+    if (!to) {
+      return res
+        .status(400)
+        .json({ error: "Receiver number 'to' is required" });
+    }
+
+    // -------------------------------------------------------------
+    // 1. Load WhatsApp Account
+    // -------------------------------------------------------------
     const account = await getWhatsappAccount(user_id);
     if (!account)
       return res.status(400).json({ error: "WhatsApp account not found" });
@@ -251,47 +359,62 @@ export async function sendTemplate(req, res) {
       return res.status(400).json({ error: "Missing phone_number_id" });
 
     // -------------------------------------------------------------
-    // 3. Build components EXACTLY as Meta expects
+    // 2. Get Template Data from Meta
     // -------------------------------------------------------------
+    const metaTemplates = await wsService.listTemplatesFromMeta(
+      account.waba_id,
+      account.system_user_access_token
+    );
 
-    let finalComponents = [];
+    const allTemplates = metaTemplates.data || [];
 
-    // Case A: frontend provides exact components → use them
-    if (body.components && Array.isArray(body.components)) {
-      finalComponents = body.components;
+    const template = allTemplates.find((t) => t.id === templateId);
+
+    if (!template) {
+      return res.status(404).json({ error: "Template not found on Meta" });
     }
 
-    // Case B: variables provided (for normal templates)
-    else if (body.variables && Array.isArray(body.variables)) {
+    // -------------------------------------------------------------
+    // 3. Build correct Component Payload
+    // -------------------------------------------------------------
+    let finalComponents = [];
+
+    // CASE A → Frontend sends FULL components (best)
+    if (components && Array.isArray(components)) {
+      finalComponents = components;
+    }
+    // CASE B → frontend sends only variables (normal)
+    else if (variables && Array.isArray(variables)) {
       finalComponents = [
         {
           type: "body",
-          parameters: body.variables.map((v) => ({
+          parameters: variables.map((v) => ({
             type: "text",
             text: v,
           })),
         },
       ];
     }
-
-    // Case C: template is stored as media template (if nothing provided)
-    else if (tpl.components && tpl.components.length > 0) {
-      finalComponents = tpl.components;
+    // CASE C → Template has NO variables (simple, static template)
+    else {
+      finalComponents = []; // No components needed
     }
 
     // -------------------------------------------------------------
-    // 4. Final message payload
+    // 4. Prepare Final Meta Payload
     // -------------------------------------------------------------
     const messagePayload = {
       messaging_product: "whatsapp",
-      to: body.to,
+      to: to,
       type: "template",
       template: {
-        name: tpl.name,
-        language: { code: tpl.language || "en_US" },
+        name: template.name,
+        language: { code: template.language || "en_US" },
         components: finalComponents,
       },
     };
+
+    // console.log("FINAL PAYLOAD:", JSON.stringify(messagePayload, null, 2));
 
     // -------------------------------------------------------------
     // 5. Send to Meta
@@ -303,13 +426,13 @@ export async function sendTemplate(req, res) {
     );
 
     // -------------------------------------------------------------
-    // 6. Log message
+    // 6. Log message (Supabase)
     // -------------------------------------------------------------
     const log = {
       wm_id: uuidv4(),
       account_id: account.wa_id,
-      to_number: body.to,
-      template_name: tpl.name,
+      to_number: to,
+      template_name: template.name,
       message_body: messagePayload,
       wa_message_id: sendResp?.messages?.[0]?.id || null,
       status: sendResp.error ? "FAILED" : "SENT",
@@ -317,10 +440,15 @@ export async function sendTemplate(req, res) {
 
     await supabase.from("whatsapp_messages").insert(log);
 
-    return res.json({ sendResp, log });
+    // -------------------------------------------------------------
+    // 7. Return Response
+    // -------------------------------------------------------------
+    return res.json({ success: true, sendResp, log });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.response?.data || err.message });
+    console.error("SEND TEMPLATE ERROR:", err);
+    res.status(500).json({
+      error: err.response?.data || err.message,
+    });
   }
 }
 
@@ -465,6 +593,53 @@ export async function listMetaTemplates(req, res) {
     res.json({ templates: data.data || [] });
   } catch (err) {
     console.error("LIST META TEMPLATES ERROR:", err);
+    res.status(500).json({ error: err.message || err });
+  }
+}
+
+// Get a single meta template by templateId
+export async function getSingleMetaTemplate(req, res) {
+  try {
+    const user_id = req.query.user_id;
+    const templateId = req.query?.templateId;
+    const templateName = req.query?.templateName;
+
+    if (!user_id) return res.status(400).json({ error: "user_id is required" });
+
+    if (!templateId && !templateName)
+      return res
+        .status(400)
+        .json({ error: "templateId or templateName is required" });
+
+    // Fetch WhatsApp account details
+    const account = await getWhatsappAccount(user_id);
+
+    // Fetch all templates from Meta
+    const data = await wsService.listTemplatesFromMeta(
+      account.waba_id,
+      account.system_user_access_token
+    );
+
+    const templates = data.data || [];
+
+    // Find template by id
+
+    let template;
+
+    if (templateId) {
+      template = templates.find((tpl) => tpl.id === templateId);
+    } else if (templateName) {
+      template = templates.find((tpl) => tpl.name === templateName);
+    }
+    // const template = templates.find((tpl) => tpl.id === templateId);
+
+    if (!template) {
+      return res.status(404).json({ error: "Template not found" });
+    }
+
+    res.json({ template });
+  } catch (err) {
+    console.error("GET META TEMPLATE ERROR:", err);
     res.status(500).json({ error: err.message || err });
   }
 }

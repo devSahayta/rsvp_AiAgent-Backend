@@ -5,18 +5,31 @@ import {
   createEventWithCsv,
   getEventsByUser,
   getEventById,
-   getEventRSVPData,
-   getEventDetails,
-   getConversationStatus,
-
+  getEventRSVPData,
+  getEventDetails,
+  getConversationStatus,
+  getEventParticipants,
+  getEventRSVPData,
+  getEventDetails,
+  getConversationStatus,
 } from "../controllers/eventController.js";
 
-import {authenticateUser} from "../middleware/authMiddleware.js"
+import { authenticateUser } from "../middleware/authMiddleware.js";
 
-import { triggerBatchCall ,getRSVPDataByEvent,retryBatchCall,syncBatchStatuses,getBatchStatus,getDashboardData } from "../controllers/eventController.js";
+import {
+  triggerBatchCall,
+  getRSVPDataByEvent,
+  retryBatchCall,
+  syncBatchStatuses,
+  getBatchStatus,
+  getDashboardData,
+} from "../controllers/eventController.js";
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+}); // 10MB
 
 // Create event + upload CSV + parse and insert participants
 // multipart/form-data fields: user_id, event_name, event_date, dataset(file)
@@ -27,6 +40,9 @@ router.get("/", getEventsByUser);
 
 // Get single event by id
 router.get("/:eventId", getEventById);
+
+//get all participant from event ID
+router.get("/:event_id/participants", getEventParticipants);
 
 router.post("/:eventId/call-batch", triggerBatchCall);
 // Get RSVP data for a single event
@@ -39,9 +55,11 @@ router.get("/:eventId/batch-status", getBatchStatus);
 router.get("/:eventId/rsvp-data", getEventRSVPData);
 
 router.get("/:eventId", authenticateUser, getEventDetails);
-router.get("/:eventId/conversation-status", authenticateUser, getConversationStatus);
+router.get(
+  "/:eventId/conversation-status",
+  authenticateUser,
+  getConversationStatus
+);
 router.get("/:eventId/dashboard", getDashboardData);
-
-
 
 export default router;

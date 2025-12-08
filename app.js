@@ -10,6 +10,7 @@ import whatsappRoutes from "./routes/whatsappRoutes.js";
 import { extractKindeUser } from "./middleware/extractKindeUser.js";
 import { authenticateUser } from "./middleware/authMiddleware.js";
 import chatRoutes from "./routes/chatRoutes.js";
+import travelItineraryRoutes from "./routes/travelItineraryRoutes.js";
 import whatsappTemplateRoutes from "./routes/whatsappTemplateRoutes.js";
 
 dotenv.config();
@@ -41,6 +42,7 @@ app.use("/api/uploads", authenticateUser, uploadRoutes);
 app.use("/api/credits", creditRoutes);
 app.use("/", whatsappRoutes);
 app.use("/api", chatRoutes);
+app.use("/api", travelItineraryRoutes);
 
 //route for whatapp template
 app.use("/api/watemplates", whatsappTemplateRoutes);

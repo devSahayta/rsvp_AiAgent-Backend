@@ -2,6 +2,7 @@
 
 import dotenv from "dotenv";
 dotenv.config();
+import axios from "axios";
 
 import { sendInitialTemplateMessage, sendWhatsAppTextMessage, fetchMediaUrl } from "../utils/whatsappClient.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
@@ -12,6 +13,20 @@ import { autoExtractFromImage } from "../utils/autoExtractor.js";
 const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
 
+
+async function fetchTemplateFromSystem(templateName) {
+  const userId = "kp_c7f2725ff7a74158bb7eae3060d6f1de"; // static for now
+
+  const url = `http://localhost:5000/api/watemplates/meta/template?user_id=${userId}&templateName=${templateName}`;
+
+  try {
+    const { data } = await axios.get(url);
+    return data.template;
+  } catch (err) {
+    console.error("⚠️ Failed to fetch WA template:", err.response?.data || err);
+    return null;
+  }
+}
 /* ---------------------------
    NEW: Save Travel Itinerary Helper - FIXED FOR MULTIPLE ATTENDEES
    --------------------------- */
@@ -697,23 +712,78 @@ export const startInitialMessage = async (req, res) => {
     const { event_id } = req.body;
     if (!event_id) return res.status(400).json({ error: "Event ID is required" });
 
+    // 🚀 Fetch participants
     const { data: participants, error } = await supabase
       .from("participants")
       .select("participant_id, full_name, phone_number, event_id")
       .eq("event_id", event_id);
     
     if (error) throw error;
+    if (!participants?.length) return res.status(404).json({ error: "No participants found" });
 
+    // 📌 Fetch Template only once
+    const templateName = "rsvp_initial_message";
+    const metaTemplate = await fetchTemplateFromSystem(templateName);
+
+    if (!metaTemplate)
+      return res.status(500).json({ error: "Failed to load WhatsApp template" });
+
+    // 🧩 Extract Body Content with {{1}} placeholder
+    const templateBody = metaTemplate?.components?.find(c => c.type === "BODY")?.text;
+
+    if (!templateBody)
+      return res.status(500).json({ error: "Template body missing" });
+
+    // 🔁 Send to each participant
     for (const person of participants) {
       let phone = person.phone_number.toString().trim();
       if (!phone.startsWith("91")) phone = "91" + phone;
-      
-      const templateComponents = [
-        { type: "body", parameters: [{ type: "text", text: person.full_name || "Guest" }] }
-      ];
-      
-      await sendInitialTemplateMessage(phone, "invite_rsvp", templateComponents);
 
+      const name = person.full_name?.trim() || "Guest";
+
+      // 🌟 Replace placeholder
+      const personalizedMessage = templateBody.replace("{{1}}", name);
+
+      // 📤 Send Template to WhatsApp
+      await sendInitialTemplateMessage(phone, templateName, [
+        { type: "body", parameters: [{ type: "text", text: name }] }
+      ]);
+
+      // 💬 Store in Chat Logs (same as batch logic)
+      let chat_id;
+      const { data: existingChat } = await supabase
+        .from("chats")
+        .select("chat_id")
+        .eq("phone_number", phone)
+        .eq("event_id", person.event_id)
+        .maybeSingle();
+
+      if (existingChat?.chat_id) {
+        chat_id = existingChat.chat_id;
+      } else {
+        const { data: newChat } = await supabase
+          .from("chats")
+          .insert({
+            event_id: person.event_id,
+            phone_number: phone,
+            person_name: name,
+            last_message: personalizedMessage
+          })
+          .select("chat_id")
+          .single();
+
+        chat_id = newChat.chat_id;
+      }
+
+      // 🗃️ Save message
+      await supabase.from("messages").insert({
+        chat_id,
+        sender_type: "admin",
+        message_type: "text",
+        message: personalizedMessage
+      });
+
+      // 🏷️ Update RSVP status tracking
       const { data: existingConvo } = await supabase
         .from("conversation_results")
         .select("result_id")
@@ -729,24 +799,30 @@ export const startInitialMessage = async (req, res) => {
         });
       }
 
-      convoCache.set(person.participant_id, { 
-        call_status: "awaiting_rsvp", 
-        currentDoc: { name: null, role: null, type: null }, 
-        pendingDocs: [], 
-        lastUpdated: new Date(), 
-        event_id: person.event_id 
+      // ♻️ Cache memory
+      convoCache.set(person.participant_id, {
+        call_status: "awaiting_rsvp",
+        currentDoc: { name: null, role: null, type: null },
+        pendingDocs: [],
+        lastUpdated: new Date(),
+        event_id: person.event_id
       });
     }
 
     return res.json({ 
       success: true, 
-      message: "✅ Initial messages triggered successfully!" 
+      message: "✅ Initial messages triggered successfully!"
     });
+
   } catch (err) {
     console.error("❌ WhatsApp Send Error:", err?.response?.data || err);
     return res.status(500).json({ error: "WhatsApp send failed" });
   }
 };
+
+
+// 🌐 Fetch WhatsApp Template Meta Data From Your API
+
 
 export const sendBatchInitialMessage = async (req, res) => {
   try {
@@ -768,6 +844,22 @@ export const sendBatchInitialMessage = async (req, res) => {
     }
 
     let targetParticipants = participants;
+
+    // 📌 Load template one time
+const templateName = "invite_rsvp";
+const metaTemplate = await fetchTemplateFromSystem(templateName);
+
+if (!metaTemplate) {
+  return res.status(500).json({ error: "Failed to load WhatsApp template" });
+}
+
+// 🧩 Extract the WHATSAPP TEMPLATE BODY TEXT (e.g. Hi {{1}} ...)
+const templateBody = metaTemplate?.components?.find(c => c.type === "BODY")?.text;
+
+if (!templateBody) {
+  return res.status(500).json({ error: "Template body missing" });
+}
+
     
     if (filter_null_rsvp) {
       const { data: conversations } = await supabase
@@ -806,6 +898,46 @@ export const sendBatchInitialMessage = async (req, res) => {
         ];
 
         await sendInitialTemplateMessage(phone, templateName, templateComponents);
+
+        // 🏷 Store the template message in DB as "admin"
+// 🏷 Build personalized message using template
+const personalizedMessage = templateBody.replace("{{1}}", name);
+
+
+// 👉 Ensure chat exists or create a new one
+let chat_id;
+const { data: existingChat } = await supabase
+  .from("chats")
+  .select("chat_id")
+  .eq("phone_number", phone)
+  .eq("event_id", p.event_id)
+  .maybeSingle();
+
+if (existingChat?.chat_id) {
+  chat_id = existingChat.chat_id;
+} else {
+  const { data: newChat } = await supabase
+    .from("chats")
+    .insert({
+      event_id: p.event_id,
+      phone_number: phone,
+      person_name: name,
+      last_message: personalizedMessage
+    })
+    .select("chat_id")
+    .single();
+
+  chat_id = newChat.chat_id;
+}
+
+// 💬 Insert message log
+await supabase.from("messages").insert({
+  chat_id,
+  sender_type: "admin",
+  message_type:"text",   // 👈 IMPORTANT
+  message: personalizedMessage
+});
+
 
         const { data: existingConvo } = await supabase
           .from("conversation_results")

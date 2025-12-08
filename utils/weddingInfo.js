@@ -49,7 +49,24 @@ EVENT SCHEDULE:
 export const STATE_INSTRUCTIONS = {
   awaiting_rsvp: `Ask naturally: "Hey! Are you planning to join us for the wedding? Just let me know - Yes, No, or Maybe works!"
 Examples: "Yes, wouldn't miss it!", "No, sorry can't make it", "Maybe, need to check"
-Set updateDB:true, fields.rsvp_status (exact: "Yes"/"No"/"Maybe")`,
+
+CRITICAL CONDITIONAL LOGIC:
+1. If user says YES / "I'm coming" / "Count me in":
+   - Set updateDB:true, fields.rsvp_status = "Yes"
+   - Move to awaiting_guest_count
+   - Reply: "Awesome! 🎉 How many people will be coming in total, including yourself?"
+
+2. If user says NO / "I'm not coming" / "Can't make it":
+   - Set updateDB:true, fields.rsvp_status = "No"
+   - Move to completed
+   - Reply: "No problem! I've recorded your RSVP as 'No'. 😔 If you change your mind later, just reach out and I can update it anytime!"
+
+3. If user says MAYBE / "Not sure" / "I'll let you know":
+   - Set updateDB:true, fields.rsvp_status = "Maybe"
+   - Move to completed  
+   - Reply: "Got it! I've recorded your status as 'Maybe'. 😊 Whenever you decide, just message me and I'll update your RSVP - no problem at all!"
+
+NEVER ask for guest count unless RSVP status is "Yes"!`,
 
   awaiting_guest_count: `Ask warmly: "Great! How many people will be coming in total, including yourself?"
 Examples: "Just me (1)", "2 of us", "My family of 4"
@@ -444,8 +461,48 @@ CRITICAL NAME EXTRACTION:
 Examples: "Sneha Sharma", "Rahul", "Priya"
 Extract name, store in cacheUpdate.currentDocName, move to awaiting_doc_role`,
 
-  completed: `Reply enthusiastically: "You're all set! 🎊 Thanks for completing the RSVP. See you at the wedding - it's going to be amazing! 💕"
-No further actions needed.`
+completed: `Reply based on their RSVP status:
+
+If RSVP = "Yes":
+"You're all set! 🎊 Thanks for completing the RSVP. See you at the wedding - it's going to be amazing! 💕"
+
+If RSVP = "No":  
+"Thanks for letting me know! 😔 If anything changes, feel free to reach out anytime."
+
+If RSVP = "Maybe":
+"No problem! You're all set for now. 😊 Just message me whenever you decide!"
+
+If user asks about wedding details/venue/timing, provide wedding info from WEDDING_INFO.
+
+If user wants to update RSVP, move to confirm_rsvp_update state.`,
+
+ completed: `...your updated completed state from above...`,
+
+confirm_rsvp_update: `User wants to change their RSVP. Ask warmly:
+
+"Sure! What's your updated RSVP status?
+
+Reply:
+- **Yes** - I'm coming!
+- **No** - Can't make it
+- **Maybe** - Still deciding"
+
+HANDLING:
+1. If YES:
+   - Update fields.rsvp_status = "Yes"
+   - Check if number_of_guests exists
+   - If no guest count yet → Move to awaiting_guest_count, ask: "Awesome! Updated to 'Yes'! 🎉 How many people total?"
+   - If guest count exists → Move to completed, reply: "Updated to 'Yes'! See you there! 🎉"
+
+2. If NO:
+   - Update fields.rsvp_status = "No"  
+   - Move to completed
+   - Reply: "Updated to 'No'. Thanks for letting me know! If you change your mind, reach out anytime."
+
+3. If MAYBE:
+   - Update fields.rsvp_status = "Maybe"
+   - Move to completed
+   - Reply: "Updated to 'Maybe'. No rush - decide whenever you're ready! 😊"`
 };
 
 // Random examples for variety

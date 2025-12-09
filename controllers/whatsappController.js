@@ -13,11 +13,13 @@ import { autoExtractFromImage } from "../utils/autoExtractor.js";
 const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
 
+const TEMPLATE_URL = process.env.TEMPLATE_BASE_URL;
+
 
 async function fetchTemplateFromSystem(templateName) {
   const userId = "kp_c7f2725ff7a74158bb7eae3060d6f1de"; // static for now
 
-  const url = `http://localhost:5000/api/watemplates/meta/template?user_id=${userId}&templateName=${templateName}`;
+  const url = `${TEMPLATE_URL}?user_id=${userId}&templateName=${templateName}`;
 
   try {
     const { data } = await axios.get(url);

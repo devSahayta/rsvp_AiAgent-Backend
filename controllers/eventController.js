@@ -751,3 +751,98 @@ export const getEventParticipants = async (req, res) => {
     res.status(500).json({ error: "Server error fetching participants" });
   }
 };
+
+// ------------------------------------delete ----------------------------------------
+
+// export const deleteEvent = async (req, res) => {
+//   try {
+//     const { eventId } = req.params;
+
+//     // 1️⃣ Check event exists
+//     const { data: eventData, error: eventError } = await supabase
+//       .from("events")
+//       .select("event_id")
+//       .eq("event_id", eventId)
+//       .single();
+
+//     if (eventError || !eventData) {
+//       return res.status(404).json({ error: "Event not found" });
+//     }
+
+//     // 2️⃣ Delete event (triggers cascade delete)
+//     const { error } = await supabase
+//       .from("events")
+//       .delete()
+//       .eq("event_id", eventId);
+
+//     if (error) {
+//       return res.status(500).json({ error: "Delete failed", details: error });
+//     }
+
+//     return res.status(200).json({ message: "Event deleted successfully" });
+//   } catch (err) {
+//     return res.status(500).json({ error: "Internal server error" });
+//   }
+// };
+
+export const deleteEvent = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    if (!eventId) {
+      return res.status(400).json({ error: "Event ID missing" });
+    }
+    // 1) :mag_right: Get all chats for this event
+    const { data: chats } = await supabase
+      .from("chats")
+      .select("chat_id")
+      .eq("event_id", eventId);
+    const chatIds = chats?.map((c) => c.chat_id) || [];
+    // 2) :wastebasket: Delete messages under those chats
+    if (chatIds.length > 0) {
+      await supabase.from("messages").delete().in("chat_id", chatIds);
+    }
+    // 3) :mag_right: Get participants for this event
+    const { data: participants } = await supabase
+      .from("participants")
+      .select("participant_id")
+      .eq("event_id", eventId);
+    const participantIds = participants?.map((p) => p.participant_id) || [];
+    // 4) :wastebasket: Delete participant-linked data (DB)
+    if (participantIds.length > 0) {
+      await supabase
+        .from("uploads")
+        .delete()
+        .in("participant_id", participantIds);
+      await supabase
+        .from("travel_itinerary")
+        .delete()
+        .in("participant_id", participantIds);
+      await supabase
+        .from("conversation_results")
+        .delete()
+        .in("participant_id", participantIds);
+    }
+    // :star::star::star: NEW STEP: DELETE FILES FROM SUPABASE STORAGE :star::star::star:
+    try {
+      if (participantIds.length > 0) {
+        // bucket name: participant-docs
+        for (let pid of participantIds) {
+          // Delete folder for each participant
+          await supabase.storage.from("participant-docs").remove([`${pid}/`]); // :warning: deletes everything in the folder
+        }
+      }
+    } catch (storageErr) {
+      console.error(":warning: Storage cleanup failed:", storageErr);
+    }
+    // 5) :wastebasket: Delete chats for event
+    await supabase.from("chats").delete().eq("event_id", eventId);
+    // 6) :wastebasket: Delete participants
+    await supabase.from("participants").delete().eq("event_id", eventId);
+    // 7) :wastebasket: Delete the event itself
+    await supabase.from("events").delete().eq("event_id", eventId);
+    return res.status(200).json({ message: "Event deleted successfully" });
+  } catch (error) {
+    console.error("Delete event error:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};

@@ -7,7 +7,7 @@ const router = express.Router();
 
 router.get("/whatsapp/webhook", verifyWebhook);
 router.post("/whatsapp/webhook", handleIncomingMessage);
-router.post("/whatsapp/send-batch", authenticateUser,sendBatchInitialMessage );
+router.post("/whatsapp/send-batch",sendBatchInitialMessage );
 router.post("/whatsapp/start-initial-message", startInitialMessage);
 
 export default router;

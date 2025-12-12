@@ -452,6 +452,137 @@ export async function sendTemplate(req, res) {
   }
 }
 
+//in bulk sending template
+
+export async function sendTemplateBulk(req, res) {
+  try {
+    const templateId = req.params.templateId;
+    const { user_id, recipients, components, variables } = req.body;
+
+    if (!templateId)
+      return res.status(400).json({ error: "templateId is required" });
+    if (!user_id) return res.status(400).json({ error: "user_id is required" });
+
+    if (!Array.isArray(recipients) || recipients.length === 0)
+      return res.status(400).json({ error: "recipients[] required" });
+
+    // --------------------------------------------
+    // Load WhatsApp account
+    // --------------------------------------------
+    const account = await getWhatsappAccount(user_id);
+    if (!account)
+      return res.status(400).json({ error: "WhatsApp account not found" });
+
+    const token = account.system_user_access_token;
+    const phoneNumberId = account.phone_number_id;
+
+    if (!token || !phoneNumberId)
+      return res.status(400).json({ error: "Missing WhatsApp configuration" });
+
+    // --------------------------------------------
+    // Fetch template from Meta
+    // --------------------------------------------
+    const metaTemplates = await wsService.listTemplatesFromMeta(
+      account.waba_id,
+      token
+    );
+    const allTemplates = metaTemplates.data || [];
+
+    const template = allTemplates.find((t) => t.id === templateId);
+    if (!template)
+      return res.status(404).json({ error: "Template not found on Meta" });
+
+    // --------------------------------------------
+    // Prepare component payload once
+    // --------------------------------------------
+    let finalComponents = [];
+
+    if (components && Array.isArray(components)) {
+      finalComponents = components;
+    } else if (variables && Array.isArray(variables)) {
+      finalComponents = [
+        {
+          type: "body",
+          parameters: variables.map((v) => ({ type: "text", text: v })),
+        },
+      ];
+    }
+
+    // --------------------------------------------
+    // Prepare result container
+    // --------------------------------------------
+    const results = {
+      success: [],
+      failed: [],
+    };
+
+    // Simple wait function for throttling
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // --------------------------------------------
+    // Loop each recipient with throttling
+    // --------------------------------------------
+    for (const to of recipients) {
+      const payload = {
+        messaging_product: "whatsapp",
+        to: to,
+        type: "template",
+        template: {
+          name: template.name,
+          language: { code: template.language || "en_US" },
+          components: finalComponents,
+        },
+      };
+
+      try {
+        const sendResp = await wsService.sendTemplateMessage(
+          phoneNumberId,
+          token,
+          payload
+        );
+
+        // Log success
+        const log = {
+          wm_id: uuidv4(),
+          account_id: account.wa_id,
+          to_number: to,
+          template_name: template.name,
+          message_body: payload,
+          wa_message_id: sendResp?.messages?.[0]?.id || null,
+          status: sendResp.error ? "FAILED" : "SENT",
+        };
+
+        await supabase.from("whatsapp_messages").insert(log);
+
+        results.success.push({ to, id: log.wm_id });
+      } catch (err) {
+        console.error("Send failed for:", to, err.message);
+
+        results.failed.push({
+          to,
+          error: err.response?.data || err.message,
+        });
+      }
+
+      // Throttle to stay safe from Meta
+      await wait(350); // 300–400ms is ideal
+    }
+
+    return res.json({
+      success: true,
+      total: recipients.length,
+      summary: {
+        success: results.success.length,
+        failed: results.failed.length,
+      },
+      results,
+    });
+  } catch (err) {
+    console.error("BULK SEND ERROR:", err);
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+}
+
 export async function uploadMedia(req, res) {
   try {
     const { user_id, type } = req.body;
@@ -722,5 +853,78 @@ export async function mediaProxyUrl(req, res) {
   } catch (err) {
     console.error("Media Proxy URL Error:", err);
     res.status(500).json({ error: err.message });
+  }
+}
+
+export async function deleteMetaTemplate(req, res) {
+  try {
+    const { templateId } = req.params;
+    const { user_id, template_name } = req.query;
+
+    if (!user_id) return res.status(400).json({ error: "user_id is required" });
+    if (!templateId)
+      return res.status(400).json({ error: "templateId is required" });
+
+    // Load WhatsApp Account
+    const account = await getWhatsappAccount(user_id);
+    if (!account)
+      return res.status(400).json({ error: "WhatsApp account not found" });
+
+    if (!account.system_user_access_token)
+      return res
+        .status(400)
+        .json({ error: "Missing system_user_access_token" });
+
+    // Fetch Template list from Meta
+    // const metaTemplates = await wsService.listTemplatesFromMeta(
+    //   account.waba_id,
+    //   account.system_user_access_token
+    // );
+
+    // const allTemplates = metaTemplates.data || [];
+
+    // // Find template by ID
+    // const tpl = allTemplates.find((t) => t.id === templateId);
+
+    // if (!tpl) {
+    //   return res.status(404).json({
+    //     error: "Template not found on Meta",
+    //   });
+    // }
+
+    // Perform delete API call
+    const deleteResp = await wsService.deleteMetaTemplate(
+      account.waba_id,
+      account.system_user_access_token,
+      templateId,
+      template_name
+    );
+
+    // Optionally delete it from your supabase DB also (if stored)
+    try {
+      await supabase
+        .from("whatsapp_templates")
+        .delete()
+        .eq("template_id", templateId); // adjust column name if different
+    } catch (dbErr) {
+      console.warn("Could not delete from local DB:", dbErr.message);
+    }
+
+    // return res.json({
+    //   success: true,
+    //   message: "Template deleted successfully",
+    //   deleteResp,
+    // });
+
+    return res.json({
+      success: true,
+      message: "Template deleted successfully",
+      meta: deleteResp.data || { success: true },
+    });
+  } catch (err) {
+    console.error("DELETE META TEMPLATE ERROR:", err);
+    res.status(500).json({
+      error: err.response?.data || err.message,
+    });
   }
 }

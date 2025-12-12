@@ -132,7 +132,9 @@ export async function deleteMediaFromMeta(mediaId, userToken) {
 
 // List message templates from Meta
 export async function listTemplatesFromMeta(wabaId, userToken) {
-  const url = `https://graph.facebook.com/v20.0/${wabaId}/message_templates`;
+  // const url = `https://graph.facebook.com/v20.0/${wabaId}/message_templates`;
+
+  const url = `https://graph.facebook.com/v23.0/${wabaId}/message_templates`;
 
   const resp = await axios.get(url, {
     headers: {
@@ -163,4 +165,18 @@ export async function fetchMediaFile(url, userToken) {
   });
 
   return resp; // axios stream
+}
+
+export async function deleteMetaTemplate(wabaId, accessToken, hsmId, name) {
+  const url = `https://graph.facebook.com/v23.0/${wabaId}/message_templates`;
+
+  return axios.delete(url, {
+    params: {
+      hsm_id: hsmId,
+      name: name,
+    },
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
 }

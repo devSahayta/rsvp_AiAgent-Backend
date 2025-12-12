@@ -9,9 +9,6 @@ import {
   getEventDetails,
   getConversationStatus,
   getEventParticipants,
-  getEventRSVPData,
-  getEventDetails,
-  getConversationStatus,
 } from "../controllers/eventController.js";
 
 import { authenticateUser } from "../middleware/authMiddleware.js";

@@ -8,6 +8,7 @@ import {
   checkTemplateStatus,
   listTemplates,
   sendTemplate,
+  sendTemplateBulk,
   uploadMedia,
   listMedia,
   deleteMedia,
@@ -15,6 +16,7 @@ import {
   mediaProxy,
   mediaProxyUrl,
   getSingleMetaTemplate,
+  deleteMetaTemplate,
 } from "../controllers/whatsappTemplateController.js";
 // import fetch from "node-fetch";
 
@@ -29,8 +31,12 @@ router.post("/upload-binary", upload.single("file"), uploadBinaryToSession);
 router.post("/upload-media", upload.single("file"), uploadMedia);
 router.get("/:wt_id/status", checkTemplateStatus);
 router.get("/", listTemplates);
-// router.post("/:wt_id/send", sendTemplate);
+// sending template;
 router.post("/send/:templateId", sendTemplate);
+
+//sending bulk template (more than one)
+router.post("/send-bulk/:templateId", sendTemplateBulk);
+
 router.get("/media/list", listMedia);
 router.delete("/media/:wmu_id", deleteMedia);
 
@@ -46,5 +52,8 @@ router.get("/media-proxy/:mediaId", mediaProxy);
 
 //get url for the template placeholder image
 router.get("/media-proxy-url", mediaProxyUrl);
+
+// DELETE template from Meta
+router.delete("/meta/:templateId", deleteMetaTemplate);
 
 export default router;

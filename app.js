@@ -2,6 +2,8 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import waccountRoutes from "./routes/waccountRoutes.js";
+
 import userRoutes from "./routes/userRoutes.js"; // if you have these
 import eventRoutes from "./routes/eventRoutes.js";
 import uploadRoutes from "./routes/uploadRoutes.js";
@@ -43,6 +45,7 @@ app.use("/api/credits", creditRoutes);
 app.use("/", whatsappRoutes);
 app.use("/api", chatRoutes);
 app.use("/api", travelItineraryRoutes);
+app.use("/api/waccount", waccountRoutes);
 
 //route for whatapp template
 app.use("/api/watemplates", whatsappTemplateRoutes);

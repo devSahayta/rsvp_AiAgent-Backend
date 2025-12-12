@@ -1,5 +1,6 @@
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
+import { createClient } from "@supabase/supabase-js";
+
+import dotenv from "dotenv";
 dotenv.config();
 
 // Use the Service Role Key for backend operations (bypasses RLS)

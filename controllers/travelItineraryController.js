@@ -16,7 +16,8 @@ export const getEventTravelItineraries = async (req, res) => {
     // Fetch travel itineraries with participant details
     const { data: itineraries, error } = await supabase
       .from("travel_itinerary")
-      .select(`
+      .select(
+        `
         *,
         participants!inner(
           participant_id,
@@ -24,55 +25,57 @@ export const getEventTravelItineraries = async (req, res) => {
           phone_number,
           email
         )
-      `)
+      `
+      )
       .eq("event_id", event_id)
       .order("created_at", { ascending: false });
 
     if (error) {
       console.error("❌ Error fetching travel itineraries:", error);
-      return res.status(500).json({ error: "Failed to fetch travel itineraries" });
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch travel itineraries" });
     }
 
     // Format the response
-    const formatted = itineraries.map(item => ({
+    const formatted = itineraries.map((item) => ({
       itinerary_id: item.itinerary_id,
       participant_id: item.participant_id,
       participant_name: item.participants.full_name,
       participant_phone: item.participants.phone_number,
       participant_email: item.participants.email,
       attendee_name: item.participant_relatives_name,
-      
+
       // Arrival details
       arrival: {
         date: item.arrival_date,
         time: item.arrival_time,
         transport_no: item.arrival_transport_no,
-        has_data: !!(item.arrival_date && item.arrival_time)
+        has_data: !!(item.arrival_date && item.arrival_time),
       },
-      
+
       // Return details
       return: {
         date: item.return_date,
         time: item.return_time,
         transport_no: item.return_transport_no,
-        has_data: !!(item.return_date && item.return_time)
+        has_data: !!(item.return_date && item.return_time),
       },
-      
+
       // Extracted data
       extracted_data: item.ai_json_extracted,
       document_type: item.document_type,
       direction: item.direction,
-      
+
       created_at: item.created_at,
-      updated_at: item.updated_at
+      updated_at: item.updated_at,
     }));
 
     return res.json({
       success: true,
       count: formatted.length,
-      itineraries: formatted
+      itineraries: formatted,
     });
-
   } catch (error) {
     console.error("❌ getEventTravelItineraries error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -104,15 +107,15 @@ export const getParticipantTravelItinerary = async (req, res) => {
 
     // Group by person
     const groupedByPerson = {};
-    
+
     for (const item of itineraries) {
       const personName = item.participant_relatives_name;
-      
+
       if (!groupedByPerson[personName]) {
         groupedByPerson[personName] = {
           attendee_name: personName,
           arrival: null,
-          return: null
+          return: null,
         };
       }
 
@@ -124,7 +127,7 @@ export const getParticipantTravelItinerary = async (req, res) => {
           transport_no: item.arrival_transport_no,
           from: item.ai_json_extracted?.from_location,
           to: item.ai_json_extracted?.to_location,
-          pnr: item.ai_json_extracted?.pnr
+          pnr: item.ai_json_extracted?.pnr,
         };
       }
 
@@ -135,7 +138,7 @@ export const getParticipantTravelItinerary = async (req, res) => {
           transport_no: item.return_transport_no,
           from: item.ai_json_extracted?.from_location,
           to: item.ai_json_extracted?.to_location,
-          pnr: item.ai_json_extracted?.pnr
+          pnr: item.ai_json_extracted?.pnr,
         };
       }
     }
@@ -143,9 +146,8 @@ export const getParticipantTravelItinerary = async (req, res) => {
     return res.json({
       success: true,
       participant_id,
-      attendees: Object.values(groupedByPerson)
+      attendees: Object.values(groupedByPerson),
     });
-
   } catch (error) {
     console.error("❌ getParticipantTravelItinerary error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -183,7 +185,7 @@ export const getEventTravelSummary = async (req, res) => {
       pending_arrival: 0,
       pending_return: 0,
       arrival_dates: {},
-      return_dates: {}
+      return_dates: {},
     };
 
     for (const item of itineraries) {
@@ -214,9 +216,8 @@ export const getEventTravelSummary = async (req, res) => {
     return res.json({
       success: true,
       event_id,
-      summary: stats
+      summary: stats,
     });
-
   } catch (error) {
     console.error("❌ getEventTravelSummary error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -247,9 +248,8 @@ export const deleteTravelItinerary = async (req, res) => {
 
     return res.json({
       success: true,
-      message: "Travel itinerary deleted successfully"
+      message: "Travel itinerary deleted successfully",
     });
-
   } catch (error) {
     console.error("❌ deleteTravelItinerary error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -339,7 +339,9 @@ export const getTravelItinerary = async (req, res) => {
       .single();
 
     if (convoError && convoError.code !== "PGRST116") {
-      return res.status(500).json({ error: "Error fetching conversation result" });
+      return res
+        .status(500)
+        .json({ error: "Error fetching conversation result" });
     }
 
     // 5. Proof uploaded status
@@ -354,7 +356,6 @@ export const getTravelItinerary = async (req, res) => {
       conversationResult,
       proof_uploaded: proofUploaded,
     });
-
   } catch (err) {
     console.error("getTravelItinerary Error:", err);
     res.status(500).json({ error: "Internal server error" });

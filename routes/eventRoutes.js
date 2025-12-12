@@ -74,6 +74,12 @@ import {
   getEventRSVPData,
   getEventDetails,
   getConversationStatus,
+  getEventParticipants,
+} from "../controllers/eventController.js";
+
+import { authenticateUser } from "../middleware/authMiddleware.js";
+
+import {
   triggerBatchCall,
   getRSVPDataByEvent,
   retryBatchCall,
@@ -82,8 +88,6 @@ import {
   getDashboardData,
   deleteEvent,
 } from "../controllers/eventController.js";
-
-import { authenticateUser } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
@@ -113,6 +117,9 @@ router.get("/:eventId/batch-status", getBatchStatus);
 // RSVP data
 router.get("/:eventId/rsvps", getRSVPDataByEvent);
 router.get("/:eventId/rsvp-data", getEventRSVPData);
+
+//get all participant from event ID
+router.get("/:event_id/participants", getEventParticipants);
 
 // Event details (Protected)
 router.get("/:eventId/details", authenticateUser, getEventDetails);

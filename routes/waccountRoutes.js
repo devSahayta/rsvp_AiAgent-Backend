@@ -1,9 +1,19 @@
 import express from "express";
-import { createWAccount } from "../controllers/waccountController.js";
+import {
+  createWAccount,
+  getWAccount,
+  updateWAccount,
+} from "../controllers/waccountController.js";
 
 const router = express.Router();
 
-// POST Route for saving WhatsApp account
-
+// CREATE (if not exist)
 router.post("/create-waccount", createWAccount);
+
+// FETCH
+router.get("/get-waccount", getWAccount);
+
+// UPDATE
+router.post("/update-waccount", updateWAccount);
+
 export default router;

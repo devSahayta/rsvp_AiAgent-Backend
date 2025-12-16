@@ -3,6 +3,11 @@ import { v4 as uuidv4 } from "uuid";
 import { supabase } from "../config/supabase.js";
 import * as wsService from "../services/whatsappTemplateService.js";
 import { getWhatsappAccount } from "../services/waAccountService.js";
+import {
+  renderTemplateBody,
+  getOrCreateChat,
+  extractTemplateButtons,
+} from "../utils/whatsappTemplateHelpers.js";
 import fetch from "node-fetch";
 const { FormData, Blob } = global;
 
@@ -555,6 +560,61 @@ export async function sendTemplateBulk(req, res) {
         await supabase.from("whatsapp_messages").insert(log);
 
         results.success.push({ to, id: log.wm_id });
+
+        if (!sendResp.error) {
+          // --------------------------------------------
+          // Render message text for DB
+          // --------------------------------------------
+          const renderedText = renderTemplateBody(template, finalComponents);
+
+          // --------------------------------------------
+          // Detect media (optional)
+          // --------------------------------------------
+          const headerComp = finalComponents.find((c) => c.type === "header");
+
+          const mediaPath =
+            headerComp?.parameters?.[0]?.image?.id ||
+            headerComp?.parameters?.[0]?.video?.id ||
+            headerComp?.parameters?.[0]?.document?.id ||
+            null;
+
+          // --------------------------------------------
+          // Create / Update Chat
+          // --------------------------------------------
+          const chat = await getOrCreateChat({
+            phone_number: to,
+            event_id: req.body.event_id, // FROM FRONTEND
+          });
+
+          // --------------------------------------------
+          // Insert message
+          // --------------------------------------------
+
+          //checking if any button available in template
+          const buttons = extractTemplateButtons(template);
+
+          //write message
+          await supabase.from("messages").insert({
+            chat_id: chat.chat_id,
+            sender_type: "admin",
+            message: renderedText,
+            message_type: "template",
+            media_path: mediaPath,
+            buttons,
+            created_at: new Date(),
+          });
+
+          // --------------------------------------------
+          // Update chat last message
+          // --------------------------------------------
+          await supabase
+            .from("chats")
+            .update({
+              last_message: renderedText,
+              last_message_at: new Date(),
+            })
+            .eq("chat_id", chat.chat_id);
+        }
       } catch (err) {
         console.error("Send failed for:", to, err.message);
 

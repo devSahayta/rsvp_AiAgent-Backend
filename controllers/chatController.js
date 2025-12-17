@@ -127,7 +127,7 @@ export async function getMessagesForChat({
   let query = supabase
     .from("messages")
     .select(
-      "message_id, chat_id, sender_type, message, message_type, media_path, created_at"
+      "message_id, chat_id, sender_type, message, message_type, media_path, buttons, created_at"
     )
     .eq("chat_id", chat_id)
     .order("created_at", { ascending: true })

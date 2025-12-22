@@ -15,6 +15,7 @@ import chatRoutes from "./routes/chatRoutes.js";
 import travelItineraryRoutes from "./routes/travelItineraryRoutes.js";
 import whatsappTemplateRoutes from "./routes/whatsappTemplateRoutes.js";
 import knowledgeBaseRoutes from "./routes/knowledgeBaseRoutes.js";
+import adminChatRoutes from "./routes/adminChatRoutes.js";
 
 dotenv.config();
 
@@ -53,6 +54,7 @@ app.use("/api/watemplates", whatsappTemplateRoutes);
 
 //route for knowledge base
 app.use("/api/knowledge-bases", knowledgeBaseRoutes);
+app.use("/admin", adminChatRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

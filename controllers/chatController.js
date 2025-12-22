@@ -101,7 +101,7 @@ export async function getChatsForEvent({ event_id, limit = 100, offset = 0 }) {
   const { data, error } = await supabase
     .from("chats")
     .select(
-      "chat_id, event_id, phone_number, person_name, last_message, created_at, last_message_at"
+      "chat_id, event_id, phone_number, person_name, last_message, created_at, last_message_at,mode"
     )
     .eq("event_id", event_id)
     .order("last_message_at", { ascending: false, nulls: "last" })

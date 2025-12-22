@@ -382,6 +382,29 @@ export const handleIncomingMessage = async (req, res) => {
       return res.sendStatus(200);
     }
 
+const { data: chatRow } = await supabase
+  .from("chats")
+  .select("chat_id, mode")
+  .eq("phone_number", from)
+  .eq("event_id", participant.event_id)
+  .maybeSingle();
+
+if (chatRow?.mode === "MANUAL") {
+  console.log("⛔ AI paused — admin is handling this chat");
+
+  await chatCtrl.saveMessage({
+    chat_id: chatRow.chat_id,
+    sender_type: "user",
+    message: userText || `[${incomingType.toUpperCase()}]`,
+    message_type: incomingType || "text",
+    media_path: null   // IMPORTANT: storedMediaPath not yet defined here
+  });
+
+  return res.sendStatus(200);
+}
+
+
+
     const { data: uploadedDocuments } = await supabase
       .from("uploads")
       .select("*")
@@ -780,7 +803,7 @@ export const startInitialMessage = async (req, res) => {
       // 🗃️ Save message
       await supabase.from("messages").insert({
         chat_id,
-        sender_type: "admin",
+        sender_type: "system",
         message_type: "text",
         message: personalizedMessage
       });
@@ -935,7 +958,7 @@ if (existingChat?.chat_id) {
 // 💬 Insert message log
 await supabase.from("messages").insert({
   chat_id,
-  sender_type: "admin",
+  sender_type: "system",
   message_type:"text",   // 👈 IMPORTANT
   message: personalizedMessage
 });

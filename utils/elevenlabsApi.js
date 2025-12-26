@@ -55,7 +55,7 @@ export const elevenlabsApi = {
   },
 };
 
-export const listKnowledgeBases = async () => {
+export const listElevenLabsKB = async () => {
   const res = await axios.get(`${BASE_URL}/knowledge-base`, { headers });
   return res.data.documents;
 };
@@ -75,4 +75,10 @@ export const getKnowledgeBaseContent = async (kbId) => {
     headers,
   });
   return res.data;
+};
+
+export const deleteElevenLabsKB = async (kbId) => {
+  await axios.delete(`${BASE_URL}/knowledge-base/${kbId}`, { headers });
+  // ElevenLabs returns 204 No Content
+  return true;
 };

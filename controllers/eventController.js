@@ -372,6 +372,7 @@ export const getUploadsForParticipant = async (req, res) => {
 export const triggerBatchCall = async (req, res) => {
   try {
     const { eventId } = req.params;
+    console.log("🚀 Starting batch call for eventId:", eventId);
 
     // 1️⃣ Fetch event details
     const { data: eventData, error: eventError } = await supabase
@@ -385,6 +386,8 @@ export const triggerBatchCall = async (req, res) => {
       return res.status(404).json({ error: "Event not found" });
     }
 
+    console.log("✅ Event found:", eventData.event_name);
+
     // 2️⃣ Fetch participants linked to this event
     const { data: participants, error: participantError } = await supabase
       .from("participants")
@@ -394,29 +397,71 @@ export const triggerBatchCall = async (req, res) => {
     if (participantError) throw participantError;
 
     if (!participants || participants.length === 0) {
+      console.log("❌ No participants found");
       return res
         .status(400)
         .json({ error: "No participants found for this event" });
     }
 
-    // 3️⃣ Prepare recipients for ElevenLabs
-    const recipients = participants.map((p) => ({
-      phone_number: p.phone_number,
-    }));
+    console.log(`✅ Found ${participants.length} participants`);
+
+        // 3️⃣ Prepare recipients with proper phone number format
+    const recipients = participants.map((p) => {
+      // Format phone number to E.164 format (with + prefix)
+      let formattedPhone = String(p.phone_number || '').trim();
+      
+      // Add + if missing
+      if (formattedPhone && !formattedPhone.startsWith('+')) {
+        formattedPhone = '+' + formattedPhone;
+      }
+      
+      console.log(`📱 Participant ${p.participant_id} phone:`, formattedPhone);
+      
+      const recipient = {
+        id: String(p.participant_id),
+        conversation_initiation_client_data: {
+          conversation_config_override: {
+            agent: {
+              prompt: null,
+              first_message: null,
+              language: null
+            },
+            tts: {
+              voice_id: null
+            }
+          },
+          dynamic_variables: {
+            eventId: String(eventId),
+            eventName: String(eventData.event_name)
+          }
+        },
+        phone_number: formattedPhone  // ✅ Now with + prefix
+      };
+      
+      return recipient;
+    });
+
+    console.log("📞 First recipient structure:");
+    console.log(JSON.stringify(recipients[0], null, 2));
 
     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+    console.log("⏰ Scheduled for:", new Date(scheduledUnix * 1000).toISOString());
 
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
       agent_id: process.env.ELEVENLABS_AGENT_ID,
       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
-      scheduled_time_unix: scheduledUnix,
-      recipients,
+      whatsapp_params: null,
+      recipients: recipients,
+      scheduled_time_unix: scheduledUnix
     };
 
-    console.log("Payload to ElevenLabs:", JSON.stringify(payload, null, 2));
+    console.log("\n📦 FULL PAYLOAD:");
+    console.log(JSON.stringify(payload, null, 2));
+    console.log("\n");
 
     // 4️⃣ Trigger ElevenLabs Batch
+    console.log("🔄 Sending request to ElevenLabs...");
     const response = await fetch(
       "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
       {
@@ -430,7 +475,9 @@ export const triggerBatchCall = async (req, res) => {
     );
 
     const data = await response.json();
-    console.log("ElevenLabs Response:", data);
+    console.log("📥 ElevenLabs Response Status:", response.status);
+    console.log("📥 ElevenLabs Response Data:");
+    console.log(JSON.stringify(data, null, 2));
 
     if (!response.ok) {
       console.error("❌ ElevenLabs API Error:", data);
@@ -438,6 +485,8 @@ export const triggerBatchCall = async (req, res) => {
         .status(500)
         .json({ error: "Batch call failed", details: data });
     }
+
+    console.log("✅ Batch call created successfully, batch_id:", data.id);
 
     // 5️⃣ Update event with batch_id + status
     const { error: updateError } = await supabase
@@ -449,10 +498,13 @@ export const triggerBatchCall = async (req, res) => {
       .eq("event_id", eventId);
 
     if (updateError) {
-      console.error("Error updating event with batch_id:", updateError);
+      console.error("⚠️ Error updating event with batch_id:", updateError);
+    } else {
+      console.log("✅ Event updated with batch_id");
     }
 
     // 6️⃣ 🔥 Create placeholder conversation_results for each participant if missing
+    console.log("🔄 Creating placeholder conversation results...");
     for (const participant of participants) {
       const { data: existing, error: existingError } = await supabase
         .from("conversation_results")
@@ -462,7 +514,7 @@ export const triggerBatchCall = async (req, res) => {
         .maybeSingle();
 
       if (existingError) {
-        console.warn("Check existing conversation error:", existingError);
+        console.warn("⚠️ Check existing conversation error:", existingError);
         continue;
       }
 
@@ -473,8 +525,8 @@ export const triggerBatchCall = async (req, res) => {
             {
               participant_id: participant.participant_id,
               event_id: eventId,
-              call_status: "pending", // Default
-              rsvp_status: null, // Default neutral state
+              call_status: "pending",
+              rsvp_status: null,
               number_of_guests: 0,
               notes: null,
               last_updated: new Date().toISOString(),
@@ -483,12 +535,18 @@ export const triggerBatchCall = async (req, res) => {
 
         if (insertError) {
           console.error(
-            `Error inserting placeholder conversation for participant ${participant.participant_id}:`,
+            `❌ Error inserting placeholder for participant ${participant.participant_id}:`,
             insertError
           );
+        } else {
+          console.log(`✅ Placeholder created for participant ${participant.participant_id}`);
         }
+      } else {
+        console.log(`ℹ️ Conversation result already exists for participant ${participant.participant_id}`);
       }
     }
+
+    console.log("🎉 Batch call process completed successfully!");
 
     // 7️⃣ Return success response
     return res.status(200).json({
@@ -496,10 +554,20 @@ export const triggerBatchCall = async (req, res) => {
       batch: data,
       batch_id: data.id,
       recipients_count: participants.length,
+      debug: {
+        event_id: eventId,
+        event_name: eventData.event_name,
+        scheduled_time: new Date(scheduledUnix * 1000).toISOString(),
+        sample_recipient: recipients[0] || null
+      }
     });
   } catch (err) {
-    console.error("triggerBatchCall error:", err);
-    return res.status(500).json({ error: "Failed to trigger batch call" });
+    console.error("💥 triggerBatchCall error:", err);
+    console.error("Stack trace:", err.stack);
+    return res.status(500).json({ 
+      error: "Failed to trigger batch call",
+      details: err.message 
+    });
   }
 };
 

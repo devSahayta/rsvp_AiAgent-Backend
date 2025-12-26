@@ -371,23 +371,49 @@ export const handleIncomingMessage = async (req, res) => {
       mediaId 
     });
 
-    const { data: participant } = await supabase
-      .from("participants")
-      .select("*")
+    // const { data: participant } = await supabase
+    //   .from("participants")
+    //   .select("*")
+    //   .eq("phone_number", from)
+    //   .maybeSingle();
+    
+    // if (!participant) {
+    //   console.warn("⚠️ Participant not found for phone:", from);
+    //   return res.sendStatus(200);
+    // }
+    
+    const { data: chatRow } = await supabase
+      .from("chats")
+      .select("chat_id, event_id, mode")
       .eq("phone_number", from)
+      .order("last_message_at", { ascending: false })
+      .limit(1)
       .maybeSingle();
     
-    if (!participant) {
-      console.warn("⚠️ Participant not found for phone:", from);
+    if (!chatRow) {
+      console.warn("⚠️ No chat found for phone:", from);
       return res.sendStatus(200);
     }
 
-const { data: chatRow } = await supabase
-  .from("chats")
-  .select("chat_id, mode")
+
+    const { data: participant } = await supabase
+  .from("participants")
+  .select("*")
   .eq("phone_number", from)
-  .eq("event_id", participant.event_id)
+  .eq("event_id", chatRow.event_id)
   .maybeSingle();
+
+if (!participant) {
+  console.warn(
+    "⚠️ Participant not found for phone + event:",
+    from,
+    chatRow.event_id
+  );
+  return res.sendStatus(200);
+}
+
+
+
 
 if (chatRow?.mode === "MANUAL") {
   console.log("⛔ AI paused — admin is handling this chat");

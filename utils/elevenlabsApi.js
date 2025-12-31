@@ -82,3 +82,33 @@ export const deleteElevenLabsKB = async (kbId) => {
   // ElevenLabs returns 204 No Content
   return true;
 };
+
+// Get agent config
+export const getAgent = async (agentId) => {
+  const res = await axios.get(`${BASE_URL}/agents/${agentId}`, { headers });
+  return res.data;
+};
+
+// Duplicate agent
+export const duplicateAgent = async ({ agentId, name }) => {
+  const res = await axios.post(
+    `${BASE_URL}/agents/${agentId}/duplicate`,
+    { name },
+    { headers }
+  );
+  return res.data; // returns new agent object
+};
+
+// Update agent (FULL payload required)
+export const updateAgent = async ({ agentId, payload }) => {
+  const res = await axios.patch(`${BASE_URL}/agents/${agentId}`, payload, {
+    headers,
+  });
+  return res.data;
+};
+
+// Delete agent
+export const deleteAgent = async (agentId) => {
+  await axios.delete(`${BASE_URL}/agents/${agentId}`, { headers });
+  return true; // 204
+};

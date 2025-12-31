@@ -10,6 +10,13 @@ import {
 } from "../models/eventModel.js";
 import { getEventWithParticipants } from "../models/eventModel.js";
 
+import {
+  getAgent,
+  duplicateAgent,
+  updateAgent,
+  deleteAgent,
+} from "../utils/elevenlabsApi.js";
+
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import fetch from "node-fetch";
 
@@ -36,8 +43,13 @@ const findColumn = (headers, candidates) => {
 };
 
 export const createEventWithCsv = async (req, res) => {
+  const BASE_AGENTS = {
+    wedding: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
+  };
+
   try {
-    const { user_id, event_name, event_date } = req.body;
+    const { user_id, event_name, event_date, event_type, knowledge_base_id } =
+      req.body;
     const file = req.file;
 
     if (!user_id || !event_name || !event_date) {
@@ -49,6 +61,12 @@ export const createEventWithCsv = async (req, res) => {
       return res
         .status(400)
         .json({ error: "CSV file (field name: dataset) is required" });
+    }
+
+    if (!event_type || !knowledge_base_id) {
+      return res.status(400).json({
+        error: "event_type and knowledge_base_id are required",
+      });
     }
 
     // 1) Upload CSV to Supabase Storage
@@ -78,8 +96,60 @@ export const createEventWithCsv = async (req, res) => {
       event_date: new Date(event_date).toISOString(),
       uploaded_csv,
       status: "Upcoming",
+      event_type,
     };
     const event = await createEvent(eventPayload);
+
+    //A) Fetch KB from DB
+    const { data: kb, error: kbError } = await supabase
+      .from("knowledge_bases")
+      .select("*")
+      .eq("id", knowledge_base_id)
+      .single();
+
+    if (kbError || !kb) {
+      return res.status(400).json({ error: "Invalid knowledge base" });
+    }
+
+    //B) Duplicate agent
+    const baseAgentId = BASE_AGENTS[event_type];
+
+    if (!baseAgentId) {
+      return res.status(400).json({ error: "Invalid Event Type" });
+    }
+
+    const duplicatedAgent = await duplicateAgent({
+      agentId: baseAgentId,
+      name: `${event_name} Agent`,
+    });
+
+    //C) Get duplicated agent config
+    const agentConfig = await getAgent(duplicatedAgent.agent_id);
+
+    //D) Inject TEXT knowledge base
+    agentConfig.conversation_config.agent.prompt.knowledge_base = [
+      {
+        type: "text",
+        id: kb.elevenlabs_kb_id,
+        name: kb.name,
+        usage_mode: "auto",
+      },
+    ];
+
+    //E) Update agent (PATCH)
+    await updateAgent({
+      agentId: duplicatedAgent.agent_id,
+      payload: agentConfig,
+    });
+
+    //F) Update event row
+    await supabase
+      .from("events")
+      .update({
+        elevenlabs_agent_id: duplicatedAgent.agent_id,
+        knowledge_base_id,
+      })
+      .eq("event_id", event.event_id);
 
     // 3) Parse CSV → gather participants
     const rows = [];
@@ -405,18 +475,18 @@ export const triggerBatchCall = async (req, res) => {
 
     console.log(`✅ Found ${participants.length} participants`);
 
-        // 3️⃣ Prepare recipients with proper phone number format
+    // 3️⃣ Prepare recipients with proper phone number format
     const recipients = participants.map((p) => {
       // Format phone number to E.164 format (with + prefix)
-      let formattedPhone = String(p.phone_number || '').trim();
-      
+      let formattedPhone = String(p.phone_number || "").trim();
+
       // Add + if missing
-      if (formattedPhone && !formattedPhone.startsWith('+')) {
-        formattedPhone = '+' + formattedPhone;
+      if (formattedPhone && !formattedPhone.startsWith("+")) {
+        formattedPhone = "+" + formattedPhone;
       }
-      
+
       console.log(`📱 Participant ${p.participant_id} phone:`, formattedPhone);
-      
+
       const recipient = {
         id: String(p.participant_id),
         conversation_initiation_client_data: {
@@ -424,20 +494,20 @@ export const triggerBatchCall = async (req, res) => {
             agent: {
               prompt: null,
               first_message: null,
-              language: null
+              language: null,
             },
             tts: {
-              voice_id: null
-            }
+              voice_id: null,
+            },
           },
           dynamic_variables: {
             eventId: String(eventId),
-            eventName: String(eventData.event_name)
-          }
+            eventName: String(eventData.event_name),
+          },
         },
-        phone_number: formattedPhone  // ✅ Now with + prefix
+        phone_number: formattedPhone, // ✅ Now with + prefix
       };
-      
+
       return recipient;
     });
 
@@ -445,7 +515,10 @@ export const triggerBatchCall = async (req, res) => {
     console.log(JSON.stringify(recipients[0], null, 2));
 
     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
-    console.log("⏰ Scheduled for:", new Date(scheduledUnix * 1000).toISOString());
+    console.log(
+      "⏰ Scheduled for:",
+      new Date(scheduledUnix * 1000).toISOString()
+    );
 
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
@@ -453,7 +526,7 @@ export const triggerBatchCall = async (req, res) => {
       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
       whatsapp_params: null,
       recipients: recipients,
-      scheduled_time_unix: scheduledUnix
+      scheduled_time_unix: scheduledUnix,
     };
 
     console.log("\n📦 FULL PAYLOAD:");
@@ -539,10 +612,14 @@ export const triggerBatchCall = async (req, res) => {
             insertError
           );
         } else {
-          console.log(`✅ Placeholder created for participant ${participant.participant_id}`);
+          console.log(
+            `✅ Placeholder created for participant ${participant.participant_id}`
+          );
         }
       } else {
-        console.log(`ℹ️ Conversation result already exists for participant ${participant.participant_id}`);
+        console.log(
+          `ℹ️ Conversation result already exists for participant ${participant.participant_id}`
+        );
       }
     }
 
@@ -558,15 +635,15 @@ export const triggerBatchCall = async (req, res) => {
         event_id: eventId,
         event_name: eventData.event_name,
         scheduled_time: new Date(scheduledUnix * 1000).toISOString(),
-        sample_recipient: recipients[0] || null
-      }
+        sample_recipient: recipients[0] || null,
+      },
     });
   } catch (err) {
     console.error("💥 triggerBatchCall error:", err);
     console.error("Stack trace:", err.stack);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to trigger batch call",
-      details: err.message 
+      details: err.message,
     });
   }
 };
@@ -906,6 +983,34 @@ export const deleteEvent = async (req, res) => {
     await supabase.from("chats").delete().eq("event_id", eventId);
     // 6) :wastebasket: Delete participants
     await supabase.from("participants").delete().eq("event_id", eventId);
+
+    // 6.1) 🔍 Get ElevenLabs agent ID for this event
+    const { data: eventData, error: eventErr } = await supabase
+      .from("events")
+      .select("elevenlabs_agent_id")
+      .eq("event_id", eventId)
+      .single();
+
+    if (eventErr) {
+      console.warn("⚠️ Could not fetch event agent:", eventErr.message);
+    }
+
+    // 6.2) 🤖 Delete ElevenLabs agent (if exists)
+    if (eventData?.elevenlabs_agent_id) {
+      try {
+        await deleteAgent(eventData.elevenlabs_agent_id);
+        console.log(
+          `🗑️ ElevenLabs agent deleted: ${eventData.elevenlabs_agent_id}`
+        );
+      } catch (agentErr) {
+        console.warn(
+          "⚠️ Failed to delete ElevenLabs agent:",
+          agentErr.response?.data || agentErr.message
+        );
+        // DO NOT throw — event deletion must continue
+      }
+    }
+
     // 7) :wastebasket: Delete the event itself
     await supabase.from("events").delete().eq("event_id", eventId);
     return res.status(200).json({ message: "Event deleted successfully" });

@@ -515,27 +515,35 @@ if (chatRow?.mode === "MANUAL") {
     }
 
     // AI Decision
-    let decision;
-    try {
-      decision = await decideNextStep({
-        userMessage: userText || "",
-        callStatus,
-        participant,
-        convo,
-        cache,
-        event: { event_name: await getEventName(eventId) || "Event" },
-        incomingMediaUrl: storedMediaPath || null,
-        uploadedDocuments 
-      });
-    } catch (aiErr) {
-      console.error("❌ AI error (decideNextStep):", aiErr);
-      
-      await sendWhatsAppTextMessage(
-        from, 
-        `${displayName}, sorry — I'm having trouble processing that right now. Could you try again in a moment?`
-      );
-      return res.sendStatus(200);
-    }
+    // AI Decision
+let decision;
+try {
+  // Fetch full event with knowledge_base_id
+  const { data: fullEvent } = await supabase
+    .from("events")
+    .select("event_id, event_name, knowledge_base_id")
+    .eq("event_id", eventId)
+    .single();
+
+  decision = await decideNextStep({
+    userMessage: userText || "",
+    callStatus,
+    participant,
+    convo,
+    cache,
+    event: fullEvent || { event_name: "Event" },  // ← FIXED: Pass full event object
+    incomingMediaUrl: storedMediaPath || null,
+    uploadedDocuments 
+  });
+} catch (aiErr) {
+  console.error("❌ AI error (decideNextStep):", aiErr);
+  
+  await sendWhatsAppTextMessage(
+    from, 
+    `${displayName}, sorry — I'm having trouble processing that right now. Could you try again in a moment?`
+  );
+  return res.sendStatus(200);
+}
 
     if (!decision || typeof decision !== "object") {
       console.warn("AI returned invalid decision object:", decision);

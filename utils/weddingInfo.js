@@ -1,46 +1,61 @@
 // utils/weddingInfo.js
-export const WEDDING_INFO = `
-Bride: Arshia Arya  
-Parents: Ashish Prakash Arya & Barkha Arya  
+import { supabase } from "../config/supabase.js";
 
-Groom: Aditya Lahiri  
-Parents: Devashish Lahiri & Dr. Simmi Mahesh  
+/**
+ * Fetch wedding info dynamically from Knowledge Base
+ * @param {string} kbId - The knowledge_base_id from the events table
+ * @returns {Promise<string|null>} Combined KB content or null if not found
+ */
+export async function getWeddingInfo(kbId) {
+  console.log("🔍 getWeddingInfo called with kbId:", kbId);
+  
+  if (!kbId) {
+    console.warn("⚠️  No knowledge_base_id provided to getWeddingInfo");
+    return null;
+  }
 
-Venue: Caravela Beach Resort, Varca, Salcete, Goa  
-Location: https://maps.app.goo.gl/H7rGaz6Wt19uoMg1A  
+  try {
+    console.log("📡 Querying Supabase for KB entries...");
+    
+    // Fetch all KB entries for this knowledge base
+    const { data: entries, error: kbError } = await supabase
+      .from("knowledge_entries")
+      .select("content")
+      .eq("knowledge_base_id", kbId)
+      .order("created_at", { ascending: true });
 
-Wedding Dates: 20th & 21st December 2025  
-Check-in: 20th December 2025  
-Check-out: 22nd December 2025  
+    console.log("📥 Supabase response:", { 
+      hasData: !!entries, 
+      entryCount: entries?.length || 0,
+      hasError: !!kbError 
+    });
 
-EVENT SCHEDULE:
+    if (kbError) {
+      console.error("❌ Supabase error fetching KB entries:", kbError);
+      console.error("❌ Error details:", JSON.stringify(kbError, null, 2));
+      return null;
+    }
 
-- 20 Dec – Welcome Lunch + Mehendi  
-  Time: 1:00 PM onwards  
-  Venue: Varca Ballroom  
-  Dress Code: Floral & Festive  
-  Notes: High-Tea at 5 PM  
+    if (!entries || entries.length === 0) {
+      console.warn(`⚠️  No KB entries found for knowledge_base_id: ${kbId}`);
+      console.warn("⚠️  Check if knowledge_entries table has data for this KB ID");
+      return null;
+    }
 
-- 20 Dec – Sangeet  
-  Time: 6:30 PM onwards  
-  Venue: New Lawns  
-
-- 21 Dec – Haldi + Carnival  
-  Time: 11:00 AM onwards  
-  Venue: Coconut Grove  
-  Dress Code: Tropical Vibes  
-  Notes: Lunch at 1 PM onwards  
-
-- 21 Dec – Sundowner Wedding  
-  Baraat: 4:00 PM  
-  Ceremony: 5:00 PM onwards  
-  Venue: Beach Lawn  
-  Dress Code: Pastel Elegance  
-
-- 20 Dec – After Party  
-  Time: 10:30 PM onwards  
-  Venue: Varca Ballroom
-`;
+    // Combine all entries into one string
+    const combinedContent = entries.map(e => e.content).join("\n\n");
+    
+    console.log(`✅ Successfully loaded ${entries.length} KB entries`);
+    console.log(`✅ Total content length: ${combinedContent.length} characters`);
+    console.log(`✅ First 200 chars: ${combinedContent.substring(0, 200)}...`);
+    
+    return combinedContent;
+  } catch (err) {
+    console.error("❌ Exception in getWeddingInfo:", err);
+    console.error("❌ Stack trace:", err.stack);
+    return null;
+  }
+}
 
 // ========================================
 // STATE INSTRUCTIONS - UPDATED WITH TRAVEL FLOW
@@ -233,8 +248,7 @@ If for someone else:
 Reply:
 - **Arrival** - only {Name}'s arrival ticket
 - **Return** - only {Name}'s Return ticket
-- **Both** - both arrival and - **Return** - only {Name}'s Return ticket
- tickets"
+- **Both** - both arrival and Return tickets"
 
 CRITICAL HANDLING:
 1. If "Both":
@@ -461,7 +475,7 @@ CRITICAL NAME EXTRACTION:
 Examples: "Sneha Sharma", "Rahul", "Priya"
 Extract name, store in cacheUpdate.currentDocName, move to awaiting_doc_role`,
 
-completed: `Reply based on their RSVP status:
+  completed: `Reply based on their RSVP status:
 
 If RSVP = "Yes":
 "You're all set! 🎊 Thanks for completing the RSVP. See you at the wedding - it's going to be amazing! 💕"
@@ -472,13 +486,14 @@ If RSVP = "No":
 If RSVP = "Maybe":
 "No problem! You're all set for now. 😊 Just message me whenever you decide!"
 
-If user asks about wedding details/venue/timing, provide wedding info from WEDDING_INFO.
+IMPORTANT:
+- If user asks about wedding details, venue, dates, schedule, dress code, or timings:
+  → The system will fetch wedding info dynamically from the Knowledge Base
+  → This is handled automatically in decideNextStep() before reaching this state
 
 If user wants to update RSVP, move to confirm_rsvp_update state.`,
 
- completed: `...your updated completed state from above...`,
-
-confirm_rsvp_update: `User wants to change their RSVP. Ask warmly:
+  confirm_rsvp_update: `User wants to change their RSVP. Ask warmly:
 
 "Sure! What's your updated RSVP status?
 

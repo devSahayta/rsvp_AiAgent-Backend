@@ -1,6 +1,6 @@
 // utils/aiDecisionEngine.js
 import { sendToClaude } from "./claudeClient.js";
-import { WEDDING_INFO, STATE_INSTRUCTIONS } from "./weddingInfo.js";
+import { getWeddingInfo, STATE_INSTRUCTIONS } from "./weddingInfo.js";
 
 // ========================================
 // UPDATED ALLOWED STATES - ADDED NEW TRAVEL STATES
@@ -46,12 +46,206 @@ export default async function decideNextStep(context = {}) {
 
   let normalizedMessage = userMessage?.trim()?.toLowerCase();
 
+  // ===== WEDDING INFO OVERRIDE (ABSOLUTE PRIORITY) =====
+  const needsWeddingInfo =
+    /venue|location|place|address|where|map|direction/.test(normalizedMessage) ||
+    /date|when|time|timing|schedule|event|program|itinerary/.test(normalizedMessage) ||
+    /detail|info|information|send.*detail|share.*detail/.test(normalizedMessage) ||
+    /dress.*code|what.*wear|outfit/.test(normalizedMessage) ||
+    /mehendi|sangeet|haldi|wedding|ceremony|party/.test(normalizedMessage);
+
+  // 🔍 DEBUG LOGGING
+  if (needsWeddingInfo) {
+    console.log("🔍 KB FETCH TRIGGERED");
+    console.log("📋 Event object:", JSON.stringify(event, null, 2));
+    console.log("🔑 KB ID from event:", event?.knowledge_base_id);
+  }
+
+  // Fetch KB info if needed (with fallback for testing)
+  const kbId = event?.knowledge_base_id || "69fd2a69-a8c1-4cfc-9dec-ffa1ecbd59c1"; // ⚠️ Temporary fallback for testing
+  
+  if (needsWeddingInfo && kbId) {
+    console.log("🚀 Fetching KB with ID:", kbId);
+    const weddingInfo = await getWeddingInfo(kbId);
+
+    console.log("✅ KB Data received:", weddingInfo ? `${weddingInfo.substring(0, 100)}...` : "NULL");
+
+    if (weddingInfo) {
+      // Check if user ONLY asked about dress code
+      const isDressCodeOnly = /dress.*code|what.*wear|outfit/i.test(normalizedMessage) &&
+        !/venue|location|date|when|time|schedule/i.test(normalizedMessage);
+
+      if (isDressCodeOnly) {
+        console.log("🎨 Dress code query detected - formatting response");
+        
+        // Try to extract dress codes with event context using AI
+        try {
+          console.log("🤖 Using AI to extract and format dress codes with event names");
+          
+          const aiPrompt = `Extract ONLY the dress codes from this wedding info and format them nicely with the event names.
+
+Wedding Info:
+${weddingInfo}
+
+Format like this:
+- [Event Name]: [Dress Code] [emoji]
+
+Example:
+- Welcome Lunch + Mehendi: Floral & Festive 🌸
+- Haldi + Carnival: Tropical Vibes 🌴
+- Sundowner Wedding: Pastel Elegance ✨
+
+Return ONLY valid JSON (no markdown, no code blocks):
+{"reply": "Here are the dress codes! 👗✨\\n\\n- Event: Dress Code\\n- Event: Dress Code", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
+
+          const { text: raw } = await sendToClaude(
+            "Dress Code Assistant",
+            [{ role: "user", content: aiPrompt }],
+            { model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514", temperature: 0 }
+          );
+
+          console.log("🤖 AI raw response:", raw?.substring(0, 200));
+
+          // Clean up the response
+          let cleanedRaw = raw.trim();
+          cleanedRaw = cleanedRaw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+          
+          let parsed = {};
+          try {
+            parsed = JSON.parse(cleanedRaw);
+          } catch (e) {
+            console.warn("⚠️  First parse failed, trying regex extraction");
+            const match = cleanedRaw.match(/\{[\s\S]*\}/);
+            if (match) {
+              parsed = JSON.parse(match[0]);
+            } else {
+              throw new Error("Could not extract JSON from AI response");
+            }
+          }
+          
+          console.log("✅ Dress code AI response parsed successfully");
+          return parsed;
+          
+        } catch (err) {
+          console.error("❌ Dress code AI error:", err.message);
+          console.log("⚠️  Falling back to simple dress code extraction");
+          
+          // Fallback: Simple extraction without event names
+          const dressCodeLines = weddingInfo
+            .split('\n')
+            .filter(line => /dress.*code/i.test(line))
+            .map(line => line.trim())
+            .filter(Boolean);
+          
+          if (dressCodeLines.length > 0) {
+            const dressCodeResponse = `Here are the dress codes for the wedding! 👗✨\n\n${dressCodeLines.join('\n')}`;
+            return {
+              reply: dressCodeResponse,
+              nextState: callStatus,
+              actions: { updateDB: false, fields: {} }
+            };
+          }
+          
+          // Last resort: return full KB
+          console.log("⚠️  No dress codes found, returning full KB");
+        }
+      }
+
+      // For all other queries, use AI to answer intelligently based on the specific question
+      console.log("🤖 Using AI to answer specific question from KB");
+      try {
+        const aiPrompt = `You are EventBot, a helpful wedding assistant. Answer the user's SPECIFIC question using the wedding information provided.
+
+User asked: "${userMessage}"
+
+Wedding Information:
+${weddingInfo}
+
+CRITICAL INSTRUCTIONS:
+1. Answer ONLY what they asked - don't dump all information
+2. If they ask "location" or "venue" → Give ONLY venue name and Google Maps link
+3. If they ask "dress code" → Already handled separately
+4. If they ask "when/date/time" → Give ONLY relevant dates/times
+5. If they ask "schedule" → Give ONLY the event schedule
+6. Be conversational and friendly
+7. Use emojis sparingly (1-2 max)
+8. Keep response SHORT and focused
+
+Examples:
+- User: "location ??" → Reply: "📍 Caravela Beach Resort, Varca, Salcete, Goa\n\nHere's the location: https://maps.app.goo.gl/H7rGaz6Wt19uoMg1A"
+- User: "when is the wedding?" → Reply: "The wedding is on 20th & 21st December 2025! 🎉\n\nCheck-in: Dec 20\nCheck-out: Dec 22"
+- User: "share the location alone" → Reply: "Sure! 📍\n\nVenue: Caravela Beach Resort, Varca, Salcete, Goa\nLocation: https://maps.app.goo.gl/H7rGaz6Wt19uoMg1A"
+
+Return ONLY valid JSON (no markdown, no code blocks):
+{"reply": "your focused answer here", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
+
+        const { text: raw } = await sendToClaude(
+          "Wedding Info Assistant",
+          [{ role: "user", content: aiPrompt }],
+          { 
+            model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514", 
+            temperature: 0.3,
+            max_tokens: 300 // Keep responses concise
+          }
+        );
+
+        console.log("🤖 AI raw response (first 200 chars):", raw?.substring(0, 200));
+
+        // Clean up response - remove markdown code blocks
+        let cleanedRaw = raw.trim();
+        cleanedRaw = cleanedRaw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+
+        let parsed = {};
+        try {
+          parsed = JSON.parse(cleanedRaw);
+          console.log("✅ AI response parsed successfully");
+        } catch (e) {
+          console.warn("⚠️  First JSON parse failed, trying regex extraction");
+          const match = cleanedRaw.match(/\{[\s\S]*\}/);
+          if (match) {
+            try {
+              parsed = JSON.parse(match[0]);
+              console.log("✅ JSON extracted via regex");
+            } catch (e2) {
+              throw new Error("Could not parse AI response as JSON");
+            }
+          } else {
+            throw new Error("No JSON found in AI response");
+          }
+        }
+
+        // Validate the response has required fields
+        if (!parsed.reply || !parsed.nextState) {
+          console.warn("⚠️  Invalid AI response structure, using fallback");
+          throw new Error("AI response missing required fields");
+        }
+
+        return parsed;
+
+      } catch (err) {
+        console.error("❌ AI answer generation error:", err.message);
+        console.log("⚠️  Falling back to full KB content");
+        
+        // Fallback to full KB content
+        return {
+          reply: weddingInfo,
+          nextState: callStatus,
+          actions: { updateDB: false, fields: {} }
+        };
+      }
+    } else {
+      console.warn("⚠️  KB data was NULL - continuing with normal flow");
+    }
+  } else if (needsWeddingInfo) {
+    console.warn("⚠️  KB ID not available - cannot fetch wedding info");
+  }
+
   // Handle special button clicks
   if (normalizedMessage === "wrong_response") context.userMessage = "__WRONG_RSVP__";
   if (normalizedMessage === "change_mind") context.userMessage = "__CHANGE_RSVP__";
   if (normalizedMessage === "add_doc_self") context.userMessage = "__ADD_DOC_SELF__";
 
-const CORE_SYSTEM_PROMPT = `You are EventBot - a friendly, conversational AI assistant helping with RSVPs for Arshia & Aditya's wedding.
+const CORE_SYSTEM_PROMPT = `You are EventBot - a friendly, conversational AI assistant helping with RSVPs for a wedding event.
 
 PERSONALITY:
 - Talk like a warm, helpful friend (not a robot!)
@@ -293,22 +487,11 @@ ALLOWED STATES: ${ALLOWED_STATES.join(", ")}`;
   // ===== STATE-SPECIFIC INSTRUCTIONS =====
   const stateInstruction = STATE_INSTRUCTIONS[callStatus] || "Handle user query naturally and warmly.";
 
-// ===== IMPROVED WEDDING INFO CHECK =====
-  // Check if user is asking about wedding details, location, schedule, etc.
-  const needsWeddingInfo = 
-    /venue|location|place|address|where|map|direction/i.test(userMessage) ||
-    /date|when|time|timing|schedule|event|program|itinerary/i.test(userMessage) ||
-    /detail|info|information|send.*detail|share.*detail/i.test(userMessage) ||
-    /dress.*code|what.*wear|outfit/i.test(userMessage) ||
-    /mehendi|sangeet|haldi|wedding|ceremony|party/i.test(userMessage) ||
-    callStatus === "completed"; // Always provide info when conversation is completed
-  
-  const weddingContext = needsWeddingInfo ? `\n\n🎊 WEDDING INFORMATION (ALWAYS use this when user asks for details):\n${WEDDING_INFO}` : "";
-
   // ===== FINAL SYSTEM PROMPT =====
-  const systemPrompt = `${CORE_SYSTEM_PROMPT}
+const systemPrompt = `${CORE_SYSTEM_PROMPT}
 
-Current Task: ${stateInstruction}${weddingContext}`;
+Current Task: ${stateInstruction}`;
+
 
   // ===== OPTIMIZED USER PROMPT =====
   const userPrompt = `

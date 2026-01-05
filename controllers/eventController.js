@@ -447,9 +447,13 @@ export const triggerBatchCall = async (req, res) => {
     // 1️⃣ Fetch event details
     const { data: eventData, error: eventError } = await supabase
       .from("events")
-      .select("event_name")
+      .select("*")
       .eq("event_id", eventId)
       .single();
+
+    // console.log({eventData})
+    // return res.status(404).json({ eventData }) 
+
 
     if (eventError || !eventData) {
       console.error("Event not found:", eventError);
@@ -520,9 +524,17 @@ export const triggerBatchCall = async (req, res) => {
       new Date(scheduledUnix * 1000).toISOString()
     );
 
+    const agentConfig = await getAgent(eventData.elevenlabs_agent_id);
+  
+    if(!agentConfig)
+    {
+      return res.status(404).json({ error: "agent not found" }) 
+    }
+
+
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
-      agent_id: process.env.ELEVENLABS_AGENT_ID,
+      agent_id: eventData.elevenlabs_agent_id,
       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
       whatsapp_params: null,
       recipients: recipients,

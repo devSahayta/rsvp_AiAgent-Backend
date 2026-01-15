@@ -17,7 +17,7 @@ import whatsappTemplateRoutes from "./routes/whatsappTemplateRoutes.js";
 import knowledgeBaseRoutes from "./routes/knowledgeBaseRoutes.js";
 import adminChatRoutes from "./routes/adminChatRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
-
+import transportRoutes from './routes/transportRoutes.js';
 dotenv.config();
 
 const app = express();
@@ -59,6 +59,8 @@ app.use("/admin", adminChatRoutes);
 
 //for elevenlabs agent
 app.use("/api/agents", agentRoutes);
+//Transport routes
+    app.use('/api/transport', transportRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

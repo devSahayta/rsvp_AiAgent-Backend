@@ -288,7 +288,6 @@ export const handleIncomingMessage = async (req, res) => {
   console.log("🔹 FULL WHATSAPP PAYLOAD:", JSON.stringify(req.body, null, 2));
 
   const value = req.body.entry?.[0]?.changes?.[0]?.value;
-
   if (value?.statuses) {
     console.log("ℹ️ Status notification received:", value.statuses[0]?.status);
     return res.sendStatus(200);

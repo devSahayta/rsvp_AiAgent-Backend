@@ -18,6 +18,8 @@ import knowledgeBaseRoutes from "./routes/knowledgeBaseRoutes.js";
 import adminChatRoutes from "./routes/adminChatRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
 import transportRoutes from './routes/transportRoutes.js';
+import flightTrackingRoutes from "./routes/flightRoutes.js";
+
 dotenv.config();
 
 const app = express();
@@ -56,6 +58,9 @@ app.use("/api/watemplates", whatsappTemplateRoutes);
 //route for knowledge base
 app.use("/api/knowledge-bases", knowledgeBaseRoutes);
 app.use("/admin", adminChatRoutes);
+
+//route for flight tracking
+app.use("/api/flight-tracking", flightTrackingRoutes);
 
 //for elevenlabs agent
 app.use("/api/agents", agentRoutes);

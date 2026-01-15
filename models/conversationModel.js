@@ -42,7 +42,10 @@ export const updateConversationWithAPIData = async (
     .single();
 
   if (participantError || !participantData) {
-    console.error("❌ Could not find participant:", participantError || "Not found");
+    console.error(
+      "❌ Could not find participant:",
+      participantError || "Not found"
+    );
     return null;
   }
 
@@ -65,14 +68,17 @@ export const updateConversationWithAPIData = async (
   }
 
   if (!data || data.length === 0) {
-    console.warn(`⚠️ No matching conversation record found for participant_id ${participantId}`);
+    console.warn(
+      `⚠️ No matching conversation record found for participant_id ${participantId}`
+    );
   } else {
-    console.log(`✅ Updated record for ${phoneNumber} (participant_id: ${participantId})`);
+    console.log(
+      `✅ Updated record for ${phoneNumber} (participant_id: ${participantId})`
+    );
   }
 
   return data;
 };
-
 
 // ✅ NEW: Get participants by event_id
 export const getParticipantsByEvent = async (event_id) => {
@@ -80,6 +86,18 @@ export const getParticipantsByEvent = async (event_id) => {
     .from("conversation_results")
     .select("participant_id, phone_number")
     .eq("event_id", event_id);
+
+  if (error) throw error;
+  return data || [];
+};
+
+// ✅ NEW: Get participants by event_id
+export const getParticipantsById = async (participantId) => {
+  const { data, error } = await supabase
+    .from("participants")
+    .select("full_name, phone_number, event_id")
+    .eq("participant_id", participantId)
+    .single();
 
   if (error) throw error;
   return data || [];

@@ -510,3 +510,260 @@ export const updateDispatchStatus = async (req, res) => {
     });
   }
 };
+
+/**
+ * GET /api/transport/location-summary/:event_id
+ * Returns grouped passengers by pickup location with counts
+ */
+export const getLocationSummary = async (req, res) => {
+  try {
+    const { event_id } = req.params;
+
+    // Fetch all arrivals with passenger details
+    const { data: arrivals, error } = await supabase
+      .from("travel_itinerary")
+      .select(`
+        itinerary_id,
+        participant_id,
+        arrival_date,
+        arrival_time,
+        arrival_transport_no,
+        ai_json_extracted,
+        participants!inner(
+          full_name,
+          phone_number
+        )
+      `)
+      .eq("event_id", event_id)
+      .not("arrival_date", "is", null)
+      .order("arrival_date", { ascending: true })
+      .order("arrival_time", { ascending: true });
+
+    if (error) {
+      console.error("❌ Error fetching arrivals:", error);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to fetch arrival data"
+      });
+    }
+
+    if (!arrivals || arrivals.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          total_passengers: 0,
+          total_locations: 0,
+          locations: []
+        }
+      });
+    }
+
+    // Extract location for each passenger
+    const passengersWithLocations = arrivals.map(item => {
+      const location = extractLocationFromRecord(item);
+      
+      return {
+        participant_id: item.participant_id,
+        name: item.participants.full_name,
+        phone: item.participants.phone_number,
+        location: location,
+        arrival_date: item.arrival_date,
+        arrival_time: item.arrival_time,
+        arrival_datetime: combineDateTime(item.arrival_date, item.arrival_time),
+        transport_number: item.arrival_transport_no
+      };
+    });
+
+    // Group by location
+    const locationGroups = {};
+    
+    passengersWithLocations.forEach(passenger => {
+      const loc = passenger.location || "Unknown Location";
+      
+      if (!locationGroups[loc]) {
+        locationGroups[loc] = {
+          location: loc,
+          passenger_count: 0,
+          passengers: [],
+          earliest_arrival: passenger.arrival_datetime,
+          latest_arrival: passenger.arrival_datetime
+        };
+      }
+      
+      locationGroups[loc].passenger_count++;
+      locationGroups[loc].passengers.push({
+        name: passenger.name,
+        phone: passenger.phone,
+        arrival_time: passenger.arrival_time,
+        arrival_datetime: passenger.arrival_datetime,
+        transport_number: passenger.transport_number
+      });
+      
+      // Update earliest/latest arrival times
+      if (passenger.arrival_datetime < locationGroups[loc].earliest_arrival) {
+        locationGroups[loc].earliest_arrival = passenger.arrival_datetime;
+      }
+      if (passenger.arrival_datetime > locationGroups[loc].latest_arrival) {
+        locationGroups[loc].latest_arrival = passenger.arrival_datetime;
+      }
+    });
+
+    // Convert to array and sort by passenger count (descending)
+    const locationArray = Object.values(locationGroups)
+      .sort((a, b) => b.passenger_count - a.passenger_count);
+
+    // Add time span for each location
+    locationArray.forEach(loc => {
+      const spanMinutes = Math.floor(
+        (loc.latest_arrival - loc.earliest_arrival) / 60000
+      );
+      loc.time_span_minutes = spanMinutes;
+      loc.earliest_arrival_formatted = formatTime(loc.earliest_arrival);
+      loc.latest_arrival_formatted = formatTime(loc.latest_arrival);
+      
+      // Sort passengers by arrival time within location
+      loc.passengers.sort((a, b) => 
+        new Date(a.arrival_datetime) - new Date(b.arrival_datetime)
+      );
+    });
+
+    res.json({
+      success: true,
+      data: {
+        total_passengers: passengersWithLocations.length,
+        total_locations: locationArray.length,
+        locations: locationArray
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Location summary error:", error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Helper: Extract location from travel itinerary record
+ * Uses same logic as optimizer
+ */
+function extractLocationFromRecord(itineraryRecord) {
+  if (itineraryRecord.ai_json_extracted) {
+    const aiData = itineraryRecord.ai_json_extracted;
+    
+    // Try departure field first (most detailed)
+    if (aiData.departure) {
+      return extractDetailedLocation(aiData.departure);
+    }
+    
+    // Try from_location
+    if (aiData.from_location) {
+      return extractDetailedLocation(aiData.from_location);
+    }
+  }
+  
+  const transportNum = itineraryRecord.arrival_transport_no || "";
+  if (/^(AI|6E|UK|SG|G8)/i.test(transportNum)) return "Airport";
+  if (/^\d{5}$/i.test(transportNum)) return "Railway Station";
+  
+  return "Unknown Location";
+}
+
+/**
+ * Extract detailed location - SAME as optimizer
+ */
+function extractDetailedLocation(locationString) {
+  if (!locationString) return "Unknown Location";
+  
+  const loc = locationString.toLowerCase().trim();
+  
+  // ✅ BUS STATIONS - CHECK FIRST
+  if (loc.includes('bus')) {
+    return 'Bus Station';
+  }
+  
+  // ✅ Airport with terminal/sub-location
+  if (loc.includes('airport') || loc.includes('terminal') || /\bt\d+\b/.test(loc) || loc.includes('igi')) {
+    
+    const terminalMatch = loc.match(/\bt(\d+)\b|terminal\s*(\d+)/i);
+    
+    if (terminalMatch) {
+      const termNum = terminalMatch[1] || terminalMatch[2];
+      return `Airport Terminal ${termNum}`;
+    }
+    
+    if (loc.includes('international')) {
+      return 'Airport Terminal 2';
+    }
+    if (loc.includes('domestic')) {
+      return 'Airport Terminal 1';
+    }
+    
+    const cityMatch = loc.match(/(\w+)\s+airport/i);
+    if (cityMatch && cityMatch[1] && cityMatch[1] !== 'airport') {
+      const city = cityMatch[1].charAt(0).toUpperCase() + cityMatch[1].slice(1);
+      return `${city} Airport`;
+    }
+    
+    return 'Airport';
+  }
+  
+  // ✅ Railway with station name
+  if (loc.includes('railway') || loc.includes('station') || loc.includes('train') || loc.includes('cst')) {
+    
+    if (loc.includes('cst')) {
+      return 'Cst Railway Station';
+    }
+    
+    if (loc.includes('pune')) {
+      return 'Pune Railway Station';
+    }
+    
+    const stationMatch = loc.match(/(\w+)\s+(railway|station)/i);
+    if (stationMatch && stationMatch[1] && stationMatch[1] !== 'railway' && stationMatch[1] !== 'train') {
+      const station = stationMatch[1].charAt(0).toUpperCase() + stationMatch[1].slice(1);
+      return `${station} Railway Station`;
+    }
+    return 'Railway Station';
+  }
+  
+  return locationString;
+}
+
+/**
+ * Helper: Combine date and time
+ */
+function combineDateTime(date, time) {
+  if (!date) return null;
+
+  try {
+    const dateStr = date.includes('T') ? date.split('T')[0] : date;
+    const timeStr = time && time.includes(':') ? time : '00:00';
+
+    const dt = new Date(`${dateStr}T${timeStr}`);
+
+    if (isNaN(dt.getTime())) {
+      return null;
+    }
+
+    return dt;
+  } catch (err) {
+    console.error("Error combining date/time:", err);
+    return null;
+  }
+}
+
+/**
+ * Helper: Format time
+ */
+function formatTime(datetime) {
+  if (!datetime) return '';
+  
+  return new Date(datetime).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+}

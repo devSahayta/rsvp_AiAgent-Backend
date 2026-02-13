@@ -9,7 +9,8 @@ import {
   getPickupPlan,
   finalizePlan,
   deletePlan,
-  updateDispatchStatus
+  updateDispatchStatus,
+  getLocationSummary 
 } from '../controllers/transportController.js';
 
 import { exportPlanPDF, exportPlanExcel } from '../controllers/transportExportController.js';
@@ -55,5 +56,7 @@ router.post('/update-status/:group_id', updateDispatchStatus);
 // Export routes
 router.get('/export/pdf/:plan_id', exportPlanPDF);
 router.get('/export/excel/:plan_id', exportPlanExcel);
+
+router.get('/location-summary/:event_id', getLocationSummary);
   
 export default router;

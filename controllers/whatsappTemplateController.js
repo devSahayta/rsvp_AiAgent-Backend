@@ -11,6 +11,10 @@ import {
 import fetch from "node-fetch";
 const { FormData, Blob } = global;
 
+// top of controller file
+const bulkProgress = new Map();
+// key: user_id + templateId
+
 // create template (store in DB and optionally submit to Meta)
 export async function createTemplate(req, res) {
   try {
@@ -28,7 +32,7 @@ export async function createTemplate(req, res) {
     // Extract buttons safely
     let buttonList = [];
     const buttonComponent = payload.components?.find(
-      (c) => c.type === "BUTTONS"
+      (c) => c.type === "BUTTONS",
     );
 
     if (buttonComponent?.buttons) {
@@ -83,8 +87,36 @@ export async function createTemplate(req, res) {
             category: payload.category,
             parameter_format: payload.parameter_format || "positional",
             components: payload.components,
-          }
+          },
         );
+
+        let preview = null;
+        const templateId = metaResp?.id;
+        const templateName = payload.name;
+
+        try {
+          // Fetch all templates from Meta
+          const data = await wsService.listTemplatesFromMeta(
+            account.waba_id,
+            account.system_user_access_token,
+          );
+
+          const templates = data.data || data || [];
+
+          // Find template by id or name
+          if (templateId) {
+            preview = templates.find((tpl) => tpl.id === templateId);
+          }
+
+          if (!preview && templateName) {
+            preview = templates.find((tpl) => tpl.name === templateName);
+          }
+        } catch (e) {
+          console.warn("Template created but preview fetch failed:", e.message);
+        }
+
+        // console.log({ preview, previewComponent: preview.components });
+
         // update row with template_id and status
         await supabase
           .from("whatsapp_templates")
@@ -92,6 +124,7 @@ export async function createTemplate(req, res) {
             account_id: account.wa_id,
             template_id: metaResp.id || null,
             status: metaResp.status || "PENDING",
+            preview, // 👈 stored as jsonb
           })
           .eq("wt_id", wt_id);
         return res.status(201).json({ template: insert, meta: metaResp });
@@ -121,7 +154,7 @@ export async function createUploadSession(req, res) {
     const sessionData = await wsService.createUploadSession(
       account.app_id,
       account.system_user_access_token,
-      { file_name, file_type }
+      { file_name, file_type },
     );
 
     return res.json(sessionData);
@@ -150,7 +183,7 @@ export async function uploadBinaryToSession(req, res) {
       sessionId,
       buffer,
       req.file.mimetype || "application/octet-stream",
-      account.system_user_access_token
+      account.system_user_access_token,
     );
     return res.json(resp);
   } catch (err) {
@@ -187,10 +220,22 @@ export async function checkTemplateStatus(req, res) {
         .status(400)
         .json({ error: "Account has no system_user_access_token" });
 
+    console.log("No error till here");
+
+    console.log({
+      whatsappId: account.waba_id,
+      templateName: tpl.name,
+      token: account.system_user_access_token,
+    });
+
     const status = await wsService.checkTemplateStatusOnMeta(
-      tpl.template_id,
-      account.system_user_access_token
+      account.waba_id,
+      tpl.name,
+      account.system_user_access_token,
     );
+
+    console.log({ status });
+
     if (status && status.status)
       await supabase
         .from("whatsapp_templates")
@@ -366,12 +411,18 @@ export async function sendTemplate(req, res) {
     // -------------------------------------------------------------
     // 2. Get Template Data from Meta
     // -------------------------------------------------------------
-    const metaTemplates = await wsService.listTemplatesFromMeta(
+    // const metaTemplates = await wsService.listTemplatesFromMeta(
+    //   account.waba_id,
+    //   account.system_user_access_token
+    // );
+
+    const metaTemplates = await wsService.listTemplatesFromDb(
+      account.wa_id,
       account.waba_id,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
-    const allTemplates = metaTemplates.data || [];
+    const allTemplates = metaTemplates.data || metaTemplates || [];
 
     const template = allTemplates.find((t) => t.id === templateId);
 
@@ -427,7 +478,7 @@ export async function sendTemplate(req, res) {
     const sendResp = await wsService.sendTemplateMessage(
       account.phone_number_id,
       account.system_user_access_token,
-      messagePayload
+      messagePayload,
     );
 
     // -------------------------------------------------------------
@@ -487,11 +538,18 @@ export async function sendTemplateBulk(req, res) {
     // --------------------------------------------
     // Fetch template from Meta
     // --------------------------------------------
-    const metaTemplates = await wsService.listTemplatesFromMeta(
+    // const metaTemplates = await wsService.listTemplatesFromMeta(
+    //   account.waba_id,
+    //   token
+    // );
+
+    const metaTemplates = await wsService.listTemplatesFromDb(
+      account.wa_id,
       account.waba_id,
-      token
+      account.system_user_access_token,
     );
-    const allTemplates = metaTemplates.data || [];
+
+    const allTemplates = metaTemplates.data || metaTemplates || [];
 
     const template = allTemplates.find((t) => t.id === templateId);
     if (!template)
@@ -524,6 +582,13 @@ export async function sendTemplateBulk(req, res) {
     // Simple wait function for throttling
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+    const progressKey = `${user_id}_${templateId}`;
+
+    bulkProgress.set(progressKey, {
+      total: recipients.length,
+      completed: 0,
+    });
+
     // --------------------------------------------
     // Loop each recipient with throttling
     // --------------------------------------------
@@ -543,7 +608,7 @@ export async function sendTemplateBulk(req, res) {
         const sendResp = await wsService.sendTemplateMessage(
           phoneNumberId,
           token,
-          payload
+          payload,
         );
 
         // Log success
@@ -557,11 +622,10 @@ export async function sendTemplateBulk(req, res) {
           status: sendResp.error ? "FAILED" : "SENT",
         };
 
-        await supabase.from("whatsapp_messages").insert(log);
-
-        results.success.push({ to, id: log.wm_id });
-
         if (!sendResp.error) {
+          await supabase.from("whatsapp_messages").insert(log);
+
+          results.success.push({ to, id: log.wm_id });
           // --------------------------------------------
           // Render message text for DB
           // --------------------------------------------
@@ -583,7 +647,7 @@ export async function sendTemplateBulk(req, res) {
           // --------------------------------------------
           const chat = await getOrCreateChat({
             phone_number: to,
-            event_id: req.body.event_id, // FROM FRONTEND
+            user_id: user_id,
           });
 
           // --------------------------------------------
@@ -622,11 +686,19 @@ export async function sendTemplateBulk(req, res) {
           to,
           error: err.response?.data || err.message,
         });
+      } finally {
+        const prog = bulkProgress.get(progressKey);
+        if (prog) {
+          prog.completed += 1;
+          bulkProgress.set(progressKey, prog);
+        }
       }
 
       // Throttle to stay safe from Meta
       await wait(350); // 300–400ms is ideal
     }
+
+    bulkProgress.delete(progressKey);
 
     return res.json({
       success: true,
@@ -641,6 +713,22 @@ export async function sendTemplateBulk(req, res) {
     console.error("BULK SEND ERROR:", err);
     res.status(500).json({ error: err.response?.data || err.message });
   }
+}
+
+// For getting bulk-progress of template sending
+export function getBulkProgress(req, res) {
+  const { user_id, templateId } = req.query;
+  const key = `${user_id}_${templateId}`;
+
+  const progress = bulkProgress.get(key);
+
+  if (!progress) {
+    return res.json({ completed: 0, total: 0 });
+  }
+
+  // console.log({ progress });
+
+  res.json(progress);
 }
 
 export async function uploadMedia(req, res) {
@@ -667,7 +755,7 @@ export async function uploadMedia(req, res) {
     const metaResp = await wsService.uploadMediaForMessage(
       account.phone_number_id,
       account.system_user_access_token,
-      form
+      form,
     );
 
     // Save in database
@@ -747,7 +835,7 @@ export async function deleteMedia(req, res) {
     // ---- DELETE FROM META ----
     const metaResult = await wsService.deleteMediaFromMeta(
       media.media_id,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
     if (!metaResult.success) {
@@ -776,12 +864,20 @@ export async function listMetaTemplates(req, res) {
 
     const account = await getWhatsappAccount(user_id);
 
-    const data = await wsService.listTemplatesFromMeta(
+    //fetch from meta
+    // const data = await wsService.listTemplatesFromMeta(
+    //   account.waba_id,
+    //   account.system_user_access_token,
+    // );
+
+    //fetch from database
+    const data = await wsService.listTemplatesFromDb(
+      account.wa_id,
       account.waba_id,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
-    res.json({ templates: data.data || [] });
+    res.json({ templates: data.data || data || [] });
   } catch (err) {
     console.error("LIST META TEMPLATES ERROR:", err);
     res.status(500).json({ error: err.message || err });
@@ -806,12 +902,18 @@ export async function getSingleMetaTemplate(req, res) {
     const account = await getWhatsappAccount(user_id);
 
     // Fetch all templates from Meta
-    const data = await wsService.listTemplatesFromMeta(
+    // const data = await wsService.listTemplatesFromMeta(
+    //   account.waba_id,
+    //   account.system_user_access_token
+    // );
+
+    const data = await wsService.listTemplatesFromDb(
+      account.wa_id,
       account.waba_id,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
-    const templates = data.data || [];
+    const templates = data.data || data || [];
 
     // Find template by id
 
@@ -850,7 +952,7 @@ export async function mediaProxy(req, res) {
     // 1) Get temp URL from Meta
     const meta = await wsService.getMediaMeta(
       mediaId,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
     if (!meta.url)
@@ -859,7 +961,7 @@ export async function mediaProxy(req, res) {
     // 2) Fetch actual file stream
     const fileRes = await wsService.fetchMediaFile(
       meta.url,
-      account.system_user_access_token
+      account.system_user_access_token,
     );
 
     // 3) Return file stream to client
@@ -957,7 +1059,7 @@ export async function deleteMetaTemplate(req, res) {
       account.waba_id,
       account.system_user_access_token,
       templateId,
-      template_name
+      template_name,
     );
 
     // Optionally delete it from your supabase DB also (if stored)

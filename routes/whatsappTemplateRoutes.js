@@ -17,6 +17,7 @@ import {
   mediaProxyUrl,
   getSingleMetaTemplate,
   deleteMetaTemplate,
+  getBulkProgress,
 } from "../controllers/whatsappTemplateController.js";
 // import fetch from "node-fetch";
 
@@ -55,5 +56,8 @@ router.get("/media-proxy-url", mediaProxyUrl);
 
 // DELETE template from Meta
 router.delete("/meta/:templateId", deleteMetaTemplate);
+
+// For getting bulk-progress of template sending
+router.get("/bulk-progress", getBulkProgress);
 
 export default router;

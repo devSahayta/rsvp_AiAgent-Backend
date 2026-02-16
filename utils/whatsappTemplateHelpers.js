@@ -80,7 +80,7 @@ export async function getPersonNameByPhone({ phone_number, user_id }) {
 
   // 2️⃣ Find first matching contact
   const { data, error } = await supabase
-    .from("group_contacts")
+    .from("participants")
     .select("full_name")
     .eq("user_id", user_id)
     .ilike("phone_number", `%${last10}`)

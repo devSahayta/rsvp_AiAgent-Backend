@@ -101,7 +101,7 @@ export async function getChatsForEvent({ event_id, limit = 100, offset = 0 }) {
   const { data, error } = await supabase
     .from("chats")
     .select(
-      "chat_id, event_id, phone_number, person_name, last_message, created_at, last_message_at,mode"
+      "chat_id, event_id, phone_number, person_name, last_message, created_at, last_message_at,mode",
     )
     .eq("event_id", event_id)
     .order("last_message_at", { ascending: false, nulls: "last" })
@@ -112,6 +112,22 @@ export async function getChatsForEvent({ event_id, limit = 100, offset = 0 }) {
     console.error(":x: getChatsForEvent error:", error);
     throw error;
   }
+  return data || [];
+}
+
+export async function getChatsForUser({ user_id, limit = 100, offset = 0 }) {
+  const { data, error } = await supabase
+    .from("chats")
+    .select(
+      "chat_id, user_id, phone_number, person_name, last_message, last_message_at, created_at, mode",
+    )
+    .eq("user_id", user_id)
+    .order("last_message_at", { ascending: false })
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) throw error;
+
   return data || [];
 }
 
@@ -127,7 +143,7 @@ export async function getMessagesForChat({
   let query = supabase
     .from("messages")
     .select(
-      "message_id, chat_id, sender_type, message, message_type, media_path, created_at, buttons"
+      "message_id, chat_id, sender_type, message, message_type, media_path, created_at, buttons",
     )
     .eq("chat_id", chat_id)
     .order("created_at", { ascending: true })
@@ -137,7 +153,7 @@ export async function getMessagesForChat({
     query = supabase
       .from("messages")
       .select(
-        "message_id, chat_id, sender_type, message, message_type, media_path, created_at"
+        "message_id, chat_id, sender_type, message, message_type, media_path, created_at",
       )
       .eq("chat_id", chat_id)
       .lt("created_at", before)

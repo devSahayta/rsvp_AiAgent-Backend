@@ -15,11 +15,41 @@ router.get("/events/:eventId/chats", async (req, res) => {
     const limit = parseInt(req.query.limit || "100", 10);
     const offset = parseInt(req.query.offset || "0", 10);
 
-    const chats = await chatCtrl.getChatsForEvent({ event_id: eventId, limit, offset });
+    const chats = await chatCtrl.getChatsForEvent({
+      event_id: eventId,
+      limit,
+      offset,
+    });
     return res.json({ ok: true, chats });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ ok: false, error: err.message || "Server error" });
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || "Server error" });
+  }
+});
+
+// GET /api/chats?user_id=xxx
+router.get("/chats", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+    const limit = parseInt(req.query.limit || "100", 10);
+    const offset = parseInt(req.query.offset || "0", 10);
+
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "user_id is required" });
+    }
+
+    const chats = await chatCtrl.getChatsForUser({
+      user_id,
+      limit,
+      offset,
+    });
+
+    return res.json({ ok: true, chats });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -33,11 +63,17 @@ router.get("/chats/:chatId/messages", async (req, res) => {
     const limit = parseInt(req.query.limit || "50", 10);
     const before = req.query.before || null;
 
-    const messages = await chatCtrl.getMessagesForChat({ chat_id: chatId, limit, before });
+    const messages = await chatCtrl.getMessagesForChat({
+      chat_id: chatId,
+      limit,
+      before,
+    });
     return res.json({ ok: true, messages });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ ok: false, error: err.message || "Server error" });
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || "Server error" });
   }
 });
 
@@ -49,20 +85,27 @@ router.get("/chats/:chatId/messages", async (req, res) => {
 router.post("/chats/:chatId/messages", async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { sender_type = "admin", message = "", message_type = "text", media_path = "null" } = req.body;
+    const {
+      sender_type = "admin",
+      message = "",
+      message_type = "text",
+      media_path = "null",
+    } = req.body;
 
     const row = await chatCtrl.saveMessage({
       chat_id: chatId,
       sender_type,
       message,
       message_type,
-      media_path
+      media_path,
     });
 
     return res.json({ ok: true, message: row });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ ok: false, error: err.message || "Server error" });
+    return res
+      .status(500)
+      .json({ ok: false, error: err.message || "Server error" });
   }
 });
 

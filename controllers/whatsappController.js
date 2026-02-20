@@ -310,503 +310,598 @@ export const verifyWebhook = (req, res) => {
 /* ---------------------------
    🔥 MAIN HANDLER WITH ITINERARY STORAGE
    --------------------------- */
-export const handleIncomingMessage = async (req, res) => {
-  console.log("🔹 FULL WHATSAPP PAYLOAD:", JSON.stringify(req.body, null, 2));
+  export const handleIncomingMessage = async (req, res) => {
+    console.log("🔹 FULL WHATSAPP PAYLOAD:", JSON.stringify(req.body, null, 2));
 
-  const value = req.body.entry?.[0]?.changes?.[0]?.value;
-  if (value?.statuses) {
-    console.log("ℹ️ Status notification received:", value.statuses[0]?.status);
-    return res.sendStatus(200);
-  }
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const wabaId = req.body.entry?.[0]?.id;
+    const phoneNumberId = value?.metadata?.phone_number_id;
 
-  if (!value?.messages) {
-    console.log("⚠️ No messages field in webhook (not a user message)");
-    return res.sendStatus(200);
-  }
-
-  try {
-    const message = value?.messages?.[0];
-    const businessNumber = process.env.WHATSAPP_BUSINESS_NUMBER;
-
-    if (message.from === businessNumber && message.type === "text") {
-      const templateText = message.text?.body || "";
-      const to = message.to || message.recipient_id || null;
-
-      if (to) {
-        const { data: participant } = await supabase
-          .from("participants")
-          .select("participant_id, full_name, event_id")
-          .eq("phone_number", to)
-          .maybeSingle();
-
-        if (participant) {
-          const chat = await chatCtrl.ensureChat({
-            event_id: participant.event_id,
-            phone_number: to,
-            person_name: participant.full_name,
-          });
-
-          await chatCtrl.saveMessage({
-            chat_id: chat.chat_id,
-            sender_type: "ai",
-            message: templateText,
-            message_type: "text",
-            media_path: null,
-          });
-
-          console.log("💾 Auto-saved template message:", templateText);
-        }
-      }
-
+    if (!wabaId || !phoneNumberId) {
+      console.error("❌ Missing WABA ID or phone_number_id");
       return res.sendStatus(200);
     }
-
-    if (!message) return res.sendStatus(200);
-
-    const from = message.from;
-    const incomingType = message.type || "text";
-
-    let userText = message.text?.body?.trim() ?? "";
-    if (incomingType === "button") {
-      userText = message?.button?.payload || message?.button?.text || userText;
-    }
-
-    let mediaId = null;
-    let origFilename = null;
-    if (
-      incomingType === "image" ||
-      incomingType === "document" ||
-      incomingType === "video"
-    ) {
-      mediaId = message[incomingType]?.id || null;
-      origFilename = message.document?.filename || null;
-    }
-
-    let mediaUrl =
-      message.image?.url || message.document?.url || message.video?.url || null;
-
-    if (!mediaUrl && mediaId && typeof fetchMediaUrl === "function") {
-      try {
-        mediaUrl = await fetchMediaUrl(mediaId);
-      } catch (err) {
-        console.warn("fetchMediaUrl failed:", err);
-      }
-    }
-
-    console.log("📩 Incoming:", {
-      from,
-      incomingType,
-      preview: (userText || "").slice(0, 120),
-      mediaUrl: mediaUrl ? "YES" : "NO",
-      mediaId,
-    });
-
-    // const { data: participant } = await supabase
-    //   .from("participants")
-    //   .select("*")
-    //   .eq("phone_number", from)
-    //   .maybeSingle();
-
-    // if (!participant) {
-    //   console.warn("⚠️ Participant not found for phone:", from);
+    // if (value?.statuses) {
+    //   console.log("ℹ️ Status notification received:", value.statuses[0]?.status);
     //   return res.sendStatus(200);
     // }
 
-    const { data: chatRow } = await supabase
-      .from("chats")
-      .select("chat_id, event_id, mode")
-      .eq("phone_number", from)
-      .order("last_message_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    if (value?.statuses) {
+      for (const statusObj of value.statuses) {
+        const waMessageId = statusObj.id;
+        const status = statusObj.status; // sent | delivered | read
+        const timestamp = new Date(Number(statusObj.timestamp) * 1000);
 
-    if (!chatRow) {
-      console.warn("⚠️ No chat found for phone:", from);
-      return res.sendStatus(200);
-    }
+        console.log("📌 WA Status Update:", waMessageId, status);
 
-    const { data: participant } = await supabase
-      .from("participants")
-      .select("*")
-      .eq("phone_number", from)
-      .eq("event_id", chatRow.event_id)
-      .maybeSingle();
+        const updateData = {
+          status,
+        };
 
-    if (!participant) {
-      console.warn(
-        "⚠️ Participant not found for phone + event:",
-        from,
-        chatRow.event_id,
-      );
-      return res.sendStatus(200);
-    }
+        if (status === "sent") updateData.sent_at = timestamp;
+        if (status === "delivered") updateData.delivered_at = timestamp;
+        if (status === "read") updateData.read_at = timestamp;
 
-    if (chatRow?.mode === "MANUAL") {
-      console.log("⛔ AI paused — admin is handling this chat");
+        const { error } = await supabase
+          .from("whatsapp_messages")
+          .update(updateData)
+          .eq("wa_message_id", waMessageId);
 
-      await chatCtrl.saveMessage({
-        chat_id: chatRow.chat_id,
-        sender_type: "user",
-        message: userText || `[${incomingType.toUpperCase()}]`,
-        message_type: incomingType || "text",
-        media_path: null, // IMPORTANT: storedMediaPath not yet defined here
-      });
-
-      return res.sendStatus(200);
-    }
-
-    const { data: uploadedDocuments } = await supabase
-      .from("uploads")
-      .select("*")
-      .eq("participant_id", participant.participant_id);
-
-    const displayName = participant.full_name?.trim() || "Guest";
-    const pid = participant.participant_id;
-    const eventId = participant.event_id;
-
-    let convo = await ensureConversationRow(pid, eventId);
-    const cache = ensureCache(participant);
-    const callStatus =
-      cache.call_status || convo.call_status || "awaiting_rsvp";
-
-    // Upload media if present
-    let storedMediaPath = null;
-    let publicUrl = null;
-
-    if (mediaUrl) {
-      try {
-        console.log("📤 Uploading media to bucket...");
-        const uploadedPath = await uploadRemoteToBucket(
-          mediaUrl,
-          pid,
-          eventId,
-          origFilename || `${displayName.replace(/\s+/g, "_")}_${incomingType}`,
-        );
-
-        storedMediaPath = uploadedPath;
-        console.log("✅ Media stored at:", storedMediaPath);
-
-        const { data: signedData, error: signedError } = await supabase.storage
-          .from("participant-docs")
-          .createSignedUrl(storedMediaPath, 3600);
-
-        if (signedError) {
-          console.error("❌ Failed to generate signed URL:", signedError);
-        } else {
-          publicUrl = signedData.signedUrl;
-          console.log("🌐 Signed URL generated:", publicUrl);
-        }
-      } catch (err) {
-        console.error("❌ Failed to upload media to bucket:", err);
-        storedMediaPath = null;
-      }
-    }
-
-    // 🔥 EXTRACTION: Only for travel documents (image OR document/PDF)
-    const TRAVEL_DOC_STATES = ["awaiting_travel_doc_upload"];
-    const shouldExtract =
-      TRAVEL_DOC_STATES.includes(callStatus) &&
-      publicUrl &&
-      (incomingType === "image" || incomingType === "document");
-
-    let extractionResult = null;
-    if (shouldExtract) {
-      console.log(
-        "🤖 Running automatic travel doc extraction (state: " +
-          callStatus +
-          ")",
-      );
-
-      extractionResult = await autoExtractFromImage({
-        documentUrl: publicUrl,
-      });
-
-      console.log("📤 Extraction result:", extractionResult);
-
-      if (extractionResult?.success && extractionResult.extractedData) {
-        const data = extractionResult.extractedData;
-
-        let formattedMessage = `🛫 Travel Details Extracted:\n`;
-        formattedMessage += `Date: ${data.date ?? "N/A"}\n`;
-        formattedMessage += `Time: ${data.time ?? "N/A"}\n`;
-        formattedMessage += `From: ${data.from_location ?? "N/A"}\n`;
-        formattedMessage += `To: ${data.to_location ?? "N/A"}\n`;
-        formattedMessage += `Transport No: ${data.transport_number ?? "N/A"}\n`;
-        formattedMessage += `PNR: ${data.pnr ?? "N/A"}\n`;
-        formattedMessage += `Passenger: ${data.passenger_name ?? "N/A"}`;
-
-        await sendWhatsAppTextMessage(from, formattedMessage);
-      } else {
-        console.warn(
-          "⚠️ Extraction failed or no data:",
-          extractionResult?.error,
-        );
-      }
-    } else {
-      console.log(
-        "ℹ️ Skipping extraction (state: " +
-          callStatus +
-          ", has media: " +
-          !!publicUrl +
-          ")",
-      );
-    }
-
-    // AI Decision
-    // AI Decision
-    let decision;
-    try {
-      // Fetch full event with knowledge_base_id
-      const { data: fullEvent } = await supabase
-        .from("events")
-        .select("event_id, event_name, knowledge_base_id")
-        .eq("event_id", eventId)
-        .single();
-
-      decision = await decideNextStep({
-        userMessage: userText || "",
-        callStatus,
-        participant,
-        convo,
-        cache,
-        event: fullEvent || { event_name: "Event" }, // ← FIXED: Pass full event object
-        incomingMediaUrl: storedMediaPath || null,
-        uploadedDocuments,
-      });
-    } catch (aiErr) {
-      console.error("❌ AI error (decideNextStep):", aiErr);
-
-      await sendWhatsAppTextMessage(
-        from,
-        `${displayName}, sorry — I'm having trouble processing that right now. Could you try again in a moment?`,
-      );
-      return res.sendStatus(200);
-    }
-
-    if (!decision || typeof decision !== "object") {
-      console.warn("AI returned invalid decision object:", decision);
-      await sendWhatsAppTextMessage(
-        from,
-        `${displayName}, sorry — I couldn't understand that. Could you rephrase?`,
-      );
-      return res.sendStatus(200);
-    }
-
-    const replyToSend =
-      decision.reply ??
-      `Sorry ${displayName}, I couldn't process that. Could you please rephrase?`;
-    const nextState = decision.nextState ?? callStatus;
-    const actions = decision.actions ?? { updateDB: false, fields: {} };
-
-    console.log("🤖 AI Decision:", {
-      nextState,
-      updateDB: actions.updateDB,
-      fields: actions.fields,
-      saveUpload: actions.saveUpload ? "YES" : "NO",
-      cacheUpdate: actions.cacheUpdate ? "YES" : "NO",
-    });
-
-    // Update cache
-    if (actions.cacheUpdate) {
-      if (actions.cacheUpdate.currentDocName !== undefined) {
-        cache.currentDoc.name = actions.cacheUpdate.currentDocName;
-      }
-      if (actions.cacheUpdate.currentDocRole !== undefined) {
-        cache.currentDoc.role = actions.cacheUpdate.currentDocRole;
-      }
-      if (actions.cacheUpdate.currentDocType !== undefined) {
-        cache.currentDoc.type = actions.cacheUpdate.currentDocType;
-      }
-      console.log("💾 Cache updated:", cache.currentDoc);
-    }
-
-    // Save upload to uploads table
-    let uploadResult = null;
-    if (actions.saveUpload && storedMediaPath) {
-      try {
-        const uploadUrl =
-          actions.saveUpload.document_url === "MEDIA"
-            ? storedMediaPath
-            : actions.saveUpload.document_url;
-
-        uploadResult = await saveUploadRow({
-          participant_id: pid,
-          participant_relatives_name:
-            actions.saveUpload.participant_relatives_name ??
-            participant.full_name,
-          document_url: uploadUrl,
-          document_type: actions.saveUpload.document_type ?? "Document",
-          role: actions.saveUpload.role ?? "Self",
-        });
-
-        console.log("✅ Upload saved to uploads table");
-
-        // 🔥 Save to travel_itinerary if extraction succeeded
-        if (extractionResult?.success && extractionResult.extractedData) {
-          const docType = actions.saveUpload.document_type || "";
-
-          // Determine direction from document_type
-          let direction = null;
-          if (docType.toLowerCase().includes("arrival")) {
-            direction = "arrival";
-          } else if (docType.toLowerCase().includes("return")) {
-            direction = "return";
-          }
-
-          if (direction && uploadResult && uploadResult[0]?.upload_id) {
-            // 🔥 CRITICAL: Pass the person's name to create separate rows
-            const personName =
-              actions.saveUpload.participant_relatives_name ||
-              participant.full_name;
-
-            await saveTravelItinerary({
-              participant_id: pid,
-              upload_id: uploadResult[0].upload_id,
-              event_id: eventId,
-              extractedData: extractionResult.extractedData,
-              direction: direction,
-              document_type: docType,
-              participant_relatives_name: personName, // 🔥 NEW: Identifies who this belongs to
-            });
-          }
-        }
-      } catch (err) {
-        console.error("❌ Error inserting upload row:", err);
-      }
-    }
-
-    // Update conversation_results
-    try {
-      const { data: existingRow } = await supabase
-        .from("conversation_results")
-        .select("result_id, event_id")
-        .eq("participant_id", pid)
-        .maybeSingle();
-
-      const fieldsToUpdate = {
-        call_status: nextState,
-        last_updated: new Date().toISOString(),
-        event_id: existingRow?.event_id || eventId,
-      };
-
-      if (actions.updateDB && actions.fields) {
-        Object.keys(actions.fields).forEach((key) => {
-          fieldsToUpdate[key] = actions.fields[key];
-        });
-      }
-
-      if (storedMediaPath) {
-        fieldsToUpdate.document_url = storedMediaPath;
-        if (actions.fields?.proof_uploaded !== false) {
-          fieldsToUpdate.proof_uploaded = true;
+        if (error) {
+          console.error("❌ Failed to update message status:", error);
         }
       }
 
-      if (uploadResult && uploadResult[0]?.upload_id) {
-        fieldsToUpdate.upload_id = uploadResult[0].upload_id;
-        console.log(
-          "🔗 Linking upload_id to conversation_results:",
-          uploadResult[0].upload_id,
-        );
-      }
+      return res.sendStatus(200);
+    } 
 
-      console.log("💾 Updating conversation_results:", fieldsToUpdate);
-
-      if (existingRow) {
-        const { data: updateData, error: updateError } = await supabase
-          .from("conversation_results")
-          .update(fieldsToUpdate)
-          .eq("participant_id", pid)
-          .select();
-
-        if (updateError) {
-          console.error("❌ Error updating conversation_results:", updateError);
-        } else {
-          console.log("✅ Conversation results updated:", updateData);
-        }
-      } else {
-        const { data: insertData, error: insertError } = await supabase
-          .from("conversation_results")
-          .insert({
-            participant_id: pid,
-            event_id: eventId,
-            ...fieldsToUpdate,
-          })
-          .select();
-
-        if (insertError) {
-          console.error(
-            "❌ Error inserting conversation_results:",
-            insertError,
-          );
-        } else {
-          console.log("✅ Conversation results inserted:", insertData);
-        }
-      }
-    } catch (err) {
-      console.error("❌ Error saving to conversation_results:", err);
+    if (!value?.messages) {
+      console.log("⚠️ No messages field in webhook (not a user message)");
+      return res.sendStatus(200);
     }
-
-    cache.call_status = nextState;
-    cache.lastUpdated = new Date();
-    convoCache.set(pid, cache);
-
-    let finalReply = replyToSend;
-    if (!finalReply.toLowerCase().includes(displayName.toLowerCase())) {
-      finalReply = `${displayName}, ${finalReply}`;
-    }
-
-    await sendWhatsAppTextMessage(from, finalReply);
-
-    const chat = await chatCtrl.ensureChat({
-      event_id: eventId,
-      phone_number: from,
-      person_name: displayName,
-    });
-
-    await chatCtrl.saveMessage({
-      chat_id: chat.chat_id,
-      sender_type: "user",
-      message:
-        userText || (mediaUrl ? `[${incomingType.toUpperCase()}]` : "TEXT"),
-      message_type: incomingType || "text",
-      media_path: storedMediaPath,
-    });
-
-    await chatCtrl.saveMessage({
-      chat_id: chat.chat_id,
-      sender_type: "ai",
-      message: finalReply || "AI reply",
-      message_type: "text",
-      media_path: null,
-    });
-
-    return res.sendStatus(200);
-  } catch (err) {
-    console.error("❌ Handler Error:", err);
 
     try {
       const message = value?.messages?.[0];
       const businessNumber = process.env.WHATSAPP_BUSINESS_NUMBER;
-      if (message.from === businessNumber) {
-        console.log("ℹ️ Ignored outgoing template/business message");
+
+      if (message.from === businessNumber && message.type === "text") {
+        const templateText = message.text?.body || "";
+        const to = message.to || message.recipient_id || null;
+
+        if (to) {
+          const { data: participant } = await supabase
+            .from("participants")
+            .select("participant_id, full_name, event_id")
+            .eq("phone_number", to)
+            .maybeSingle();
+
+          if (participant) {
+            const chat = await chatCtrl.ensureChat({
+              event_id: participant.event_id,
+              phone_number: to,
+              person_name: participant.full_name,
+            });
+
+            await chatCtrl.saveMessage({
+              chat_id: chat.chat_id,
+              sender_type: "ai",
+              message: templateText,
+              message_type: "text",
+              media_path: null,
+            });
+
+            console.log("💾 Auto-saved template message:", templateText);
+          }
+        }
+
         return res.sendStatus(200);
       }
 
-      const from = message?.from;
-      if (from) {
-        await sendWhatsAppTextMessage(
+      if (!message) return res.sendStatus(200);
+
+      const from = message.from;
+      const incomingType = message.type || "text";
+
+      let userText = message.text?.body?.trim() ?? "";
+      if (incomingType === "button") {
+        userText = message?.button?.payload || message?.button?.text || userText;
+      }
+
+      let mediaId = null;
+      let origFilename = null;
+      if (
+        incomingType === "image" ||
+        incomingType === "document" ||
+        incomingType === "video"
+      ) {
+        mediaId = message[incomingType]?.id || null;
+        origFilename = message.document?.filename || null;
+      }
+
+      let mediaUrl =
+        message.image?.url || message.document?.url || message.video?.url || null;
+
+      if (!mediaUrl && mediaId && typeof fetchMediaUrl === "function") {
+        try {
+          mediaUrl = await fetchMediaUrl(mediaId);
+        } catch (err) {
+          console.warn("fetchMediaUrl failed:", err);
+        }
+      }
+
+      console.log("📩 Incoming:", {
+        from,
+        incomingType,
+        preview: (userText || "").slice(0, 120),
+        mediaUrl: mediaUrl ? "YES" : "NO",
+        mediaId,
+      });
+
+
+
+      // Get user id from whatsapp account table
+      const { data: waAccounts, error: waErr } = await supabase
+        .from("whatsapp_accounts")
+        .select("user_id")
+        .eq("waba_id", wabaId)
+        .eq("phone_number_id", phoneNumberId);
+
+      if (waErr || !waAccounts?.length) {
+        console.error("❌ No WhatsApp accounts mapped", {
+          wabaId,
+          phoneNumberId,
+        });
+        return res.sendStatus(200);
+      }
+
+      // const { data: participant } = await supabase
+      //   .from("participants")
+      //   .select("*")
+      //   .eq("phone_number", from)
+      //   .maybeSingle();
+
+      // if (!participant) {
+      //   console.warn("⚠️ Participant not found for phone:", from);
+      //   return res.sendStatus(200);
+      // }
+
+      const { data: chatRow } = await supabase
+        .from("chats")
+        .select("chat_id, event_id, mode")
+        .eq("phone_number", from)
+        .order("last_message_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!chatRow) {
+        console.warn("⚠️ No chat found for phone:", from);
+        return res.sendStatus(200);
+      }
+
+      
+
+      const { data: participant } = await supabase
+        .from("participants")
+        .select("*")
+        .eq("phone_number", from)
+        // .eq("event_id", chatRow.event_id)
+        .limit(1)
+        .maybeSingle();
+
+      if (!participant) {
+        console.warn(
+          "⚠️ Participant not found for phone + event:",
           from,
-          `Apologies — an error occurred. Please reply again.`,
+          chatRow.event_id,
+        );
+        return res.sendStatus(200);
+      }
+
+      
+
+      if (chatRow?.mode === "MANUAL") {
+        console.log("⛔ AI paused — admin is handling this chat");
+
+         // loop through every user to store message in their chat dashboard
+      for (const acc of waAccounts) {
+        const user_id = acc.user_id;
+        // const user_id = "kp_35285dbc61994bbb8d6b01d869f50c42";
+        
+
+        // find chat
+        const { data: chatRow } = await supabase
+          .from("chats")
+          .select("chat_id")
+          .eq("user_id", user_id)
+          .eq("phone_number", from)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (!chatRow?.chat_id) {
+          console.warn("⚠️ No chat found for", { user_id, from });
+          continue; // skip this user, but continue others
+        }
+
+        // save message
+        await chatCtrl.saveMessage({
+          chat_id: chatRow.chat_id,
+          sender_type: "user",
+          message:
+            userText || (mediaUrl ? `[${message.type.toUpperCase()}]` : "TEXT"),
+          message_type: message.type || "text",
+          media_path: "Null",
+        });
+
+        console.log("✅ Message saved for user:", user_id);
+      } 
+
+        // await chatCtrl.saveMessage({
+        //   chat_id: chatRow.chat_id,
+        //   sender_type: "user",
+        //   message: userText || `[${incomingType.toUpperCase()}]`,
+        //   message_type: incomingType || "text",
+        //   media_path: null, // IMPORTANT: storedMediaPath not yet defined here
+        // });
+
+        return res.sendStatus(200);
+      }
+
+      const { data: uploadedDocuments } = await supabase
+        .from("uploads")
+        .select("*")
+        .eq("participant_id", participant.participant_id);
+
+      const displayName = participant.full_name?.trim() || "Guest";
+      const pid = participant.participant_id;
+      const eventId = participant.event_id;
+
+      let convo = await ensureConversationRow(pid, eventId);
+      const cache = ensureCache(participant);
+      const callStatus =
+        cache.call_status || convo.call_status || "awaiting_rsvp";
+
+      // Upload media if present
+      let storedMediaPath = null;
+      let publicUrl = null;
+
+      if (mediaUrl) {
+        try {
+          console.log("📤 Uploading media to bucket...");
+          const uploadedPath = await uploadRemoteToBucket(
+            mediaUrl,
+            pid,
+            eventId,
+            origFilename || `${displayName.replace(/\s+/g, "_")}_${incomingType}`,
+          );
+
+          storedMediaPath = uploadedPath;
+          console.log("✅ Media stored at:", storedMediaPath);
+
+          const { data: signedData, error: signedError } = await supabase.storage
+            .from("participant-docs")
+            .createSignedUrl(storedMediaPath, 3600);
+
+          if (signedError) {
+            console.error("❌ Failed to generate signed URL:", signedError);
+          } else {
+            publicUrl = signedData.signedUrl;
+            console.log("🌐 Signed URL generated:", publicUrl);
+          }
+        } catch (err) {
+          console.error("❌ Failed to upload media to bucket:", err);
+          storedMediaPath = null;
+        }
+      }
+
+     
+      
+
+      // 🔥 EXTRACTION: Only for travel documents (image OR document/PDF)
+      const TRAVEL_DOC_STATES = ["awaiting_travel_doc_upload"];
+      const shouldExtract =
+        TRAVEL_DOC_STATES.includes(callStatus) &&
+        publicUrl &&
+        (incomingType === "image" || incomingType === "document");
+
+      let extractionResult = null;
+      if (shouldExtract) {
+        console.log(
+          "🤖 Running automatic travel doc extraction (state: " +
+            callStatus +
+            ")",
+        );
+
+        extractionResult = await autoExtractFromImage({
+          documentUrl: publicUrl,
+        });
+
+        console.log("📤 Extraction result:", extractionResult);
+
+        if (extractionResult?.success && extractionResult.extractedData) {
+          const data = extractionResult.extractedData;
+
+          let formattedMessage = `🛫 Travel Details Extracted:\n`;
+          formattedMessage += `Date: ${data.date ?? "N/A"}\n`;
+          formattedMessage += `Time: ${data.time ?? "N/A"}\n`;
+          formattedMessage += `From: ${data.from_location ?? "N/A"}\n`;
+          formattedMessage += `To: ${data.to_location ?? "N/A"}\n`;
+          formattedMessage += `Transport No: ${data.transport_number ?? "N/A"}\n`;
+          formattedMessage += `PNR: ${data.pnr ?? "N/A"}\n`;
+          formattedMessage += `Passenger: ${data.passenger_name ?? "N/A"}`;
+
+          await sendWhatsAppTextMessage(from, formattedMessage);
+        } else {
+          console.warn(
+            "⚠️ Extraction failed or no data:",
+            extractionResult?.error,
+          );
+        }
+      } else {
+        console.log(
+          "ℹ️ Skipping extraction (state: " +
+            callStatus +
+            ", has media: " +
+            !!publicUrl +
+            ")",
         );
       }
-    } catch (e) {
-      console.error("❌ Failed fallback send:", e);
-    }
 
-    return res.sendStatus(500);
-  }
-};
+      // AI Decision
+      // AI Decision
+      let decision;
+      try {
+        // Fetch full event with knowledge_base_id
+        const { data: fullEvent } = await supabase
+          .from("events")
+          .select("event_id, event_name, knowledge_base_id")
+          .eq("event_id", eventId)
+          .single();
+
+        decision = await decideNextStep({
+          userMessage: userText || "",
+          callStatus,
+          participant,
+          convo,
+          cache,
+          event: fullEvent || { event_name: "Event" }, // ← FIXED: Pass full event object
+          incomingMediaUrl: storedMediaPath || null,
+          uploadedDocuments,
+        });
+      } catch (aiErr) {
+        console.error("❌ AI error (decideNextStep):", aiErr);
+
+        await sendWhatsAppTextMessage(
+          from,
+          `${displayName}, sorry — I'm having trouble processing that right now. Could you try again in a moment?`,
+        );
+        return res.sendStatus(200);
+      }
+
+      if (!decision || typeof decision !== "object") {
+        console.warn("AI returned invalid decision object:", decision);
+        await sendWhatsAppTextMessage(
+          from,
+          `${displayName}, sorry — I couldn't understand that. Could you rephrase?`,
+        );
+        return res.sendStatus(200);
+      }
+
+      const replyToSend =
+        decision.reply ??
+        `Sorry ${displayName}, I couldn't process that. Could you please rephrase?`;
+      const nextState = decision.nextState ?? callStatus;
+      const actions = decision.actions ?? { updateDB: false, fields: {} };
+
+      console.log("🤖 AI Decision:", {
+        nextState,
+        updateDB: actions.updateDB,
+        fields: actions.fields,
+        saveUpload: actions.saveUpload ? "YES" : "NO",
+        cacheUpdate: actions.cacheUpdate ? "YES" : "NO",
+      });
+
+      // Update cache
+      if (actions.cacheUpdate) {
+        if (actions.cacheUpdate.currentDocName !== undefined) {
+          cache.currentDoc.name = actions.cacheUpdate.currentDocName;
+        }
+        if (actions.cacheUpdate.currentDocRole !== undefined) {
+          cache.currentDoc.role = actions.cacheUpdate.currentDocRole;
+        }
+        if (actions.cacheUpdate.currentDocType !== undefined) {
+          cache.currentDoc.type = actions.cacheUpdate.currentDocType;
+        }
+        console.log("💾 Cache updated:", cache.currentDoc);
+      }
+
+      // Save upload to uploads table
+      let uploadResult = null;
+      if (actions.saveUpload && storedMediaPath) {
+        try {
+          const uploadUrl =
+            actions.saveUpload.document_url === "MEDIA"
+              ? storedMediaPath
+              : actions.saveUpload.document_url;
+
+          uploadResult = await saveUploadRow({
+            participant_id: pid,
+            participant_relatives_name:
+              actions.saveUpload.participant_relatives_name ??
+              participant.full_name,
+            document_url: uploadUrl,
+            document_type: actions.saveUpload.document_type ?? "Document",
+            role: actions.saveUpload.role ?? "Self",
+          });
+
+          console.log("✅ Upload saved to uploads table");
+
+          // 🔥 Save to travel_itinerary if extraction succeeded
+          if (extractionResult?.success && extractionResult.extractedData) {
+            const docType = actions.saveUpload.document_type || "";
+
+            // Determine direction from document_type
+            let direction = null;
+            if (docType.toLowerCase().includes("arrival")) {
+              direction = "arrival";
+            } else if (docType.toLowerCase().includes("return")) {
+              direction = "return";
+            }
+
+            if (direction && uploadResult && uploadResult[0]?.upload_id) {
+              // 🔥 CRITICAL: Pass the person's name to create separate rows
+              const personName =
+                actions.saveUpload.participant_relatives_name ||
+                participant.full_name;
+
+              await saveTravelItinerary({
+                participant_id: pid,
+                upload_id: uploadResult[0].upload_id,
+                event_id: eventId,
+                extractedData: extractionResult.extractedData,
+                direction: direction,
+                document_type: docType,
+                participant_relatives_name: personName, // 🔥 NEW: Identifies who this belongs to
+              });
+            }
+          }
+        } catch (err) {
+          console.error("❌ Error inserting upload row:", err);
+        }
+      }
+
+      // Update conversation_results
+      try {
+        const { data: existingRow } = await supabase
+          .from("conversation_results")
+          .select("result_id, event_id")
+          .eq("participant_id", pid)
+          .maybeSingle();
+
+        const fieldsToUpdate = {
+          call_status: nextState,
+          last_updated: new Date().toISOString(),
+          event_id: existingRow?.event_id || eventId,
+        };
+
+        if (actions.updateDB && actions.fields) {
+          Object.keys(actions.fields).forEach((key) => {
+            fieldsToUpdate[key] = actions.fields[key];
+          });
+        }
+
+        if (storedMediaPath) {
+          fieldsToUpdate.document_url = storedMediaPath;
+          if (actions.fields?.proof_uploaded !== false) {
+            fieldsToUpdate.proof_uploaded = true;
+          }
+        }
+
+        if (uploadResult && uploadResult[0]?.upload_id) {
+          fieldsToUpdate.upload_id = uploadResult[0].upload_id;
+          console.log(
+            "🔗 Linking upload_id to conversation_results:",
+            uploadResult[0].upload_id,
+          );
+        }
+
+        console.log("💾 Updating conversation_results:", fieldsToUpdate);
+
+        if (existingRow) {
+          const { data: updateData, error: updateError } = await supabase
+            .from("conversation_results")
+            .update(fieldsToUpdate)
+            .eq("participant_id", pid)
+            .select();
+
+          if (updateError) {
+            console.error("❌ Error updating conversation_results:", updateError);
+          } else {
+            console.log("✅ Conversation results updated:", updateData);
+          }
+        } else {
+          const { data: insertData, error: insertError } = await supabase
+            .from("conversation_results")
+            .insert({
+              participant_id: pid,
+              event_id: eventId,
+              ...fieldsToUpdate,
+            })
+            .select();
+
+          if (insertError) {
+            console.error(
+              "❌ Error inserting conversation_results:",
+              insertError,
+            );
+          } else {
+            console.log("✅ Conversation results inserted:", insertData);
+          }
+        }
+      } catch (err) {
+        console.error("❌ Error saving to conversation_results:", err);
+      }
+
+      cache.call_status = nextState;
+      cache.lastUpdated = new Date();
+      convoCache.set(pid, cache);
+
+      let finalReply = replyToSend;
+      if (!finalReply.toLowerCase().includes(displayName.toLowerCase())) {
+        finalReply = `${displayName}, ${finalReply}`;
+      }
+
+      await sendWhatsAppTextMessage(from, finalReply);
+
+      const chat = await chatCtrl.ensureChat({
+        event_id: eventId,
+        phone_number: from,
+        person_name: displayName,
+      });
+
+      await chatCtrl.saveMessage({
+        chat_id: chat.chat_id,
+        sender_type: "user",
+        message:
+          userText || (mediaUrl ? `[${incomingType.toUpperCase()}]` : "TEXT"),
+        message_type: incomingType || "text",
+        media_path: storedMediaPath,
+      });
+
+      await chatCtrl.saveMessage({
+        chat_id: chat.chat_id,
+        sender_type: "ai",
+        message: finalReply || "AI reply",
+        message_type: "text",
+        media_path: null,
+      });
+
+      return res.sendStatus(200);
+    } catch (err) {
+      console.error("❌ Handler Error:", err);
+
+      try {
+        const message = value?.messages?.[0];
+        const businessNumber = process.env.WHATSAPP_BUSINESS_NUMBER;
+        if (message.from === businessNumber) {
+          console.log("ℹ️ Ignored outgoing template/business message");
+          return res.sendStatus(200);
+        }
+
+        const from = message?.from;
+        if (from) {
+          await sendWhatsAppTextMessage(
+            from,
+            `Apologies — an error occurred. Please reply again.`,
+          );
+        }
+      } catch (e) {
+        console.error("❌ Failed fallback send:", e);
+      }
+
+      return res.sendStatus(500);
+    }
+  };
 
 async function getEventName(eventId) {
   try {

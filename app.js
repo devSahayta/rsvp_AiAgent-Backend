@@ -19,6 +19,7 @@ import adminChatRoutes from "./routes/adminChatRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
 import transportRoutes from './routes/transportRoutes.js';
 import flightTrackingRoutes from "./routes/flightRoutes.js";
+import agentSystemRoutes from "./routes/agentSystemRoutes.js";
 
 dotenv.config();
 
@@ -66,6 +67,9 @@ app.use("/api/flight-tracking", flightTrackingRoutes);
 app.use("/api/agents", agentRoutes);
 //Transport routes
     app.use('/api/transport', transportRoutes);
+
+// Agent system routes
+app.use("/api/agent-system", agentSystemRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

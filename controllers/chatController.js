@@ -9,38 +9,76 @@ import { supabase } from "../config/supabase.js";
  */
 
 export async function ensureChat({ event_id, phone_number, person_name }) {
-  // try to find exact chat for event + phone
-  let { data: existing, error: findErr } = await supabase
-    .from("chats")
-    .select("*")
-    .eq("event_id", event_id)
-    .eq("phone_number", phone_number)
-    .maybeSingle();
+  
+  // 1️⃣ Try exact match first (event_id + phone)
+  if (event_id) {
+    const { data: exact, error: exactErr } = await supabase
+      .from("chats")
+      .select("*")
+      .eq("event_id", event_id)
+      .eq("phone_number", phone_number)
+      .maybeSingle();
 
-  if (findErr) {
-    console.error(":x: ensureChat find error:", findErr);
-    throw findErr;
+    if (exactErr) throw exactErr;
+
+    if (exact) {
+      console.log("✅ ensureChat: found by event_id+phone:", exact.chat_id);
+      return exact;
+    }
   }
 
-  if (existing) return existing;
+  // 2️⃣ Fallback: find ANY chat for this phone (catches user_id-only chats)
+  const { data: anyChat, error: anyErr } = await supabase
+    .from("chats")
+    .select("*")
+    .eq("phone_number", phone_number)
+    .order("created_at", { ascending: true }) // oldest first = original chat
+    .limit(1)
+    .maybeSingle();
 
-  // Insert new chat row; let DB generate chat_id
+  if (anyErr) throw anyErr;
+
+  if (anyChat) {
+    // Patch missing event_id onto existing chat
+    if (event_id && !anyChat.event_id) {
+      console.log("🔄 ensureChat: patching event_id onto existing chat:", anyChat.chat_id);
+      
+      const { data: patched, error: patchErr } = await supabase
+        .from("chats")
+        .update({
+          event_id,
+          person_name: person_name || anyChat.person_name,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("chat_id", anyChat.chat_id)
+        .select()
+        .single();
+
+      if (patchErr) throw patchErr;
+      return patched;
+    }
+
+    console.log("✅ ensureChat: found by phone only:", anyChat.chat_id);
+    return anyChat;
+  }
+
+  // 3️⃣ No chat at all — create new
+  console.log("➕ ensureChat: creating new chat for:", phone_number);
+  
   const { data: inserted, error: insertErr } = await supabase
     .from("chats")
-    .insert([
-      {
-        event_id,
-        phone_number,
-        person_name,
-        last_message: "", // set empty string instead of null
-        last_message_at: new Date().toISOString(),
-        created_at: new Date().toISOString(),
-      },
-    ])
+    .insert([{
+      event_id,
+      phone_number,
+      person_name,
+      last_message: "",
+      last_message_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    }])
     .select();
 
-  if (insertErr || !inserted || !inserted[0]) {
-    console.error(":x: ensureChat insert error:", insertErr);
+  if (insertErr || !inserted?.[0]) {
+    console.error("❌ ensureChat insert error:", insertErr);
     throw insertErr || new Error("Failed to insert chat row");
   }
 

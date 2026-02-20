@@ -48,8 +48,7 @@ export const createEventWithCsv = async (req, res) => {
   };
 
   try {
-    const { user_id, event_name, event_date, event_type, knowledge_base_id } =
-      req.body;
+    const { user_id, event_name, event_date, agent_id } = req.body;
     const file = req.file;
 
     if (!user_id || !event_name || !event_date) {
@@ -63,11 +62,17 @@ export const createEventWithCsv = async (req, res) => {
         .json({ error: "CSV file (field name: dataset) is required" });
     }
 
-    if (!event_type || !knowledge_base_id) {
+    if (!agent_id) {
       return res.status(400).json({
-        error: "event_type and knowledge_base_id are required",
+        error: "agent_id are required",
       });
     }
+
+    // if (!event_type || !knowledge_base_id) {
+    //   return res.status(400).json({
+    //     error: "event_type and knowledge_base_id are required",
+    //   });
+    // }
 
     // 1) Upload CSV to Supabase Storage
     const key = `${user_id}/${Date.now()}_${slug(event_name)}.csv`;
@@ -96,58 +101,81 @@ export const createEventWithCsv = async (req, res) => {
       event_date: new Date(event_date).toISOString(),
       uploaded_csv,
       status: "Upcoming",
-      event_type,
     };
     const event = await createEvent(eventPayload);
 
-    //A) Fetch KB from DB
-    const { data: kb, error: kbError } = await supabase
-      .from("knowledge_bases")
+    // //A) Fetch KB from DB
+    // const { data: kb, error: kbError } = await supabase
+    //   .from("knowledge_bases")
+    //   .select("*")
+    //   .eq("id", knowledge_base_id)
+    //   .single();
+
+    // if (kbError || !kb) {
+    //   return res.status(400).json({ error: "Invalid knowledge base" });
+    // }
+
+    // //B) Duplicate agent
+    // const baseAgentId = BASE_AGENTS[event_type];
+
+    // if (!baseAgentId) {
+    //   return res.status(400).json({ error: "Invalid Event Type" });
+    // }
+
+    // const duplicatedAgent = await duplicateAgent({
+    //   agentId: baseAgentId,
+    //   name: `${event_name} Agent`,
+    // });
+
+    // //C) Get duplicated agent config
+    // const agentConfig = await getAgent(duplicatedAgent.agent_id);
+
+    // //D) Inject TEXT knowledge base
+    // agentConfig.conversation_config.agent.prompt.knowledge_base = [
+    //   {
+    //     type: "text",
+    //     id: kb.elevenlabs_kb_id,
+    //     name: kb.name,
+    //     usage_mode: "auto",
+    //   },
+    // ];
+
+    // //E) Update agent (PATCH)
+    // await updateAgent({
+    //   agentId: duplicatedAgent.agent_id,
+    //   payload: agentConfig,
+    // });
+
+    //Fetch agent
+    const { data: ag, error: agError } = await supabase
+      .from("agents")
       .select("*")
-      .eq("id", knowledge_base_id)
+      .eq("agent_id", agent_id)
       .single();
 
-    if (kbError || !kb) {
-      return res.status(400).json({ error: "Invalid knowledge base" });
+    if (agError || !ag) {
+      return res.status(400).json({ error: "Invalid Agent ID" });
     }
 
-    //B) Duplicate agent
-    const baseAgentId = BASE_AGENTS[event_type];
+    //Fetch agent_template
+    const { data: template, error: templateError } = await supabase
+      .from("agents_templates")
+      .select("*")
+      .eq("template_id", ag.template_id)
+      .single();
 
-    if (!baseAgentId) {
-      return res.status(400).json({ error: "Invalid Event Type" });
+    if (templateError || !template) {
+      return res.status(400).json({ error: "No Agent Template Found" });
     }
-
-    const duplicatedAgent = await duplicateAgent({
-      agentId: baseAgentId,
-      name: `${event_name} Agent`,
-    });
-
-    //C) Get duplicated agent config
-    const agentConfig = await getAgent(duplicatedAgent.agent_id);
-
-    //D) Inject TEXT knowledge base
-    agentConfig.conversation_config.agent.prompt.knowledge_base = [
-      {
-        type: "text",
-        id: kb.elevenlabs_kb_id,
-        name: kb.name,
-        usage_mode: "auto",
-      },
-    ];
-
-    //E) Update agent (PATCH)
-    await updateAgent({
-      agentId: duplicatedAgent.agent_id,
-      payload: agentConfig,
-    });
 
     //F) Update event row
     await supabase
       .from("events")
       .update({
-        elevenlabs_agent_id: duplicatedAgent.agent_id,
-        knowledge_base_id,
+        elevenlabs_agent_id: ag.agent_id,
+        knowledge_base_id: ag.knowledge_base_id,
+        agent_id: ag.agent_id,
+        event_type: template.category,
       })
       .eq("event_id", event.event_id);
 
@@ -281,7 +309,7 @@ export const getRSVPDataByEvent = async (req, res) => {
     const { data: conversations, error: cError } = await supabase
       .from("conversation_results")
       .select(
-        "participant_id, status, proof_uploaded, document_url, created_at"
+        "participant_id, status, proof_uploaded, document_url, created_at",
       )
       .in("participant_id", participantIds);
 
@@ -290,7 +318,7 @@ export const getRSVPDataByEvent = async (req, res) => {
     // 3️⃣ Merge participants + conversations
     const rsvpData = participants.map((p) => {
       const convo = conversations.find(
-        (c) => c.participant_id === p.participant_id
+        (c) => c.participant_id === p.participant_id,
       );
 
       let status = "Pending";
@@ -393,7 +421,7 @@ export const getEventRSVPData = async (req, res) => {
           documentUpload: upload?.[0] || null,
           eventName: p.event_id, // Optional: You can JOIN event name also
         };
-      })
+      }),
     );
 
     res.json(finalData);
@@ -452,8 +480,7 @@ export const triggerBatchCall = async (req, res) => {
       .single();
 
     // console.log({eventData})
-    // return res.status(404).json({ eventData }) 
-
+    // return res.status(404).json({ eventData })
 
     if (eventError || !eventData) {
       console.error("Event not found:", eventError);
@@ -521,16 +548,14 @@ export const triggerBatchCall = async (req, res) => {
     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
     console.log(
       "⏰ Scheduled for:",
-      new Date(scheduledUnix * 1000).toISOString()
+      new Date(scheduledUnix * 1000).toISOString(),
     );
 
     const agentConfig = await getAgent(eventData.elevenlabs_agent_id);
-  
-    if(!agentConfig)
-    {
-      return res.status(404).json({ error: "agent not found" }) 
-    }
 
+    if (!agentConfig) {
+      return res.status(404).json({ error: "agent not found" });
+    }
 
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
@@ -556,7 +581,7 @@ export const triggerBatchCall = async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
-      }
+      },
     );
 
     const data = await response.json();
@@ -621,16 +646,16 @@ export const triggerBatchCall = async (req, res) => {
         if (insertError) {
           console.error(
             `❌ Error inserting placeholder for participant ${participant.participant_id}:`,
-            insertError
+            insertError,
           );
         } else {
           console.log(
-            `✅ Placeholder created for participant ${participant.participant_id}`
+            `✅ Placeholder created for participant ${participant.participant_id}`,
           );
         }
       } else {
         console.log(
-          `ℹ️ Conversation result already exists for participant ${participant.participant_id}`
+          `ℹ️ Conversation result already exists for participant ${participant.participant_id}`,
         );
       }
     }
@@ -688,7 +713,7 @@ export const retryBatchCall = async (req, res) => {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     const data = await response.json();
@@ -746,7 +771,7 @@ export const syncBatchStatuses = async (req, res) => {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     const batchData = await elevenResponse.json();
@@ -793,7 +818,7 @@ export const syncBatchStatuses = async (req, res) => {
 
     for (const recipient of recipients) {
       const participant = participants.find(
-        (p) => p.phone_number === recipient.phone_number
+        (p) => p.phone_number === recipient.phone_number,
       );
 
       if (!participant) continue;
@@ -862,7 +887,7 @@ export const getBatchStatus = async (req, res) => {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
 
     const data = await response.json();
@@ -996,32 +1021,32 @@ export const deleteEvent = async (req, res) => {
     // 6) :wastebasket: Delete participants
     await supabase.from("participants").delete().eq("event_id", eventId);
 
-    // 6.1) 🔍 Get ElevenLabs agent ID for this event
-    const { data: eventData, error: eventErr } = await supabase
-      .from("events")
-      .select("elevenlabs_agent_id")
-      .eq("event_id", eventId)
-      .single();
+    // // 6.1) 🔍 Get ElevenLabs agent ID for this event
+    // const { data: eventData, error: eventErr } = await supabase
+    //   .from("events")
+    //   .select("elevenlabs_agent_id")
+    //   .eq("event_id", eventId)
+    //   .single();
 
-    if (eventErr) {
-      console.warn("⚠️ Could not fetch event agent:", eventErr.message);
-    }
+    // if (eventErr) {
+    //   console.warn("⚠️ Could not fetch event agent:", eventErr.message);
+    // }
 
-    // 6.2) 🤖 Delete ElevenLabs agent (if exists)
-    if (eventData?.elevenlabs_agent_id) {
-      try {
-        await deleteAgent(eventData.elevenlabs_agent_id);
-        console.log(
-          `🗑️ ElevenLabs agent deleted: ${eventData.elevenlabs_agent_id}`
-        );
-      } catch (agentErr) {
-        console.warn(
-          "⚠️ Failed to delete ElevenLabs agent:",
-          agentErr.response?.data || agentErr.message
-        );
-        // DO NOT throw — event deletion must continue
-      }
-    }
+    // // 6.2) 🤖 Delete ElevenLabs agent (if exists)
+    // if (eventData?.elevenlabs_agent_id) {
+    //   try {
+    //     await deleteAgent(eventData.elevenlabs_agent_id);
+    //     console.log(
+    //       `🗑️ ElevenLabs agent deleted: ${eventData.elevenlabs_agent_id}`,
+    //     );
+    //   } catch (agentErr) {
+    //     console.warn(
+    //       "⚠️ Failed to delete ElevenLabs agent:",
+    //       agentErr.response?.data || agentErr.message,
+    //     );
+    //     // DO NOT throw — event deletion must continue
+    //   }
+    // }
 
     // 7) :wastebasket: Delete the event itself
     await supabase.from("events").delete().eq("event_id", eventId);

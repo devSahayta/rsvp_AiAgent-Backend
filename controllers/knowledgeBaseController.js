@@ -11,11 +11,17 @@ export const createKnowledgeBase = async (req, res) => {
     const { user_id, name, content } = req.body;
 
     if (!user_id) {
-      return res.status(400).json({ message: "Invalid credential" });
+      return res.status(400).json({
+        success: false,
+        error: "Invalid credential",
+      });
     }
 
     if (!name || !content) {
-      return res.status(400).json({ message: "Name and content are required" });
+      return res.status(400).json({
+        success: false,
+        error: "Name and content are required",
+      });
     }
 
     const elKb = await createTextKnowledgeBase({ name, text: content });
@@ -37,10 +43,19 @@ export const createKnowledgeBase = async (req, res) => {
       content,
     });
 
-    res.json(kb);
+    // 🔥 FIXED RESPONSE FORMAT (IMPORTANT)
+    res.json({
+      success: true,
+      data: kb,
+      message: "Knowledge base created successfully",
+    });
+
   } catch (err) {
     console.error("❌ Create KB error:", err);
-    res.status(500).json({ message: "Failed to create knowledge base" });
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to create knowledge base",
+    });
   }
 };
 

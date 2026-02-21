@@ -68,7 +68,7 @@ export const getAgentTemplate = async (req, res) => {
  * Create new agent from template
  */
 export const createAgent = async (req, res) => {
-const BASE_AGENTS = {
+  const BASE_AGENTS = {
     wedding: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
   };
 
@@ -115,35 +115,35 @@ const BASE_AGENTS = {
     }
 
     //B) Duplicate agent
-        const baseAgentId = "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw";
-    
-        if (!baseAgentId) {
-          return res.status(400).json({ error: "Invalid Event Type" });
-        }
-    
-        const duplicatedAgent = await duplicateAgent({
-          agentId: baseAgentId,
-          name: `${agent_name} Agent`,
-        });
-    
-        //C) Get duplicated agent config
-        const agentConfig = await getAgent(duplicatedAgent.agent_id);
-    
-        //D) Inject TEXT knowledge base
-        agentConfig.conversation_config.agent.prompt.knowledge_base = [
-          {
-            type: "text",
-            id: kb.elevenlabs_kb_id,
-            name: kb.name,
-            usage_mode: "auto",
-          },
-        ];
-    
-        //E) Update agent (PATCH)
-        await updateAgent({
-          agentId: duplicatedAgent.agent_id,
-          payload: agentConfig,
-        });
+    const baseAgentId = "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw";
+
+    if (!baseAgentId) {
+      return res.status(400).json({ error: "Invalid Event Type" });
+    }
+
+    const duplicatedAgent = await duplicateAgent({
+      agentId: baseAgentId,
+      name: `${agent_name} Agent`,
+    });
+
+    //C) Get duplicated agent config
+    const agentConfig = await getAgent(duplicatedAgent.agent_id);
+
+    //D) Inject TEXT knowledge base
+    agentConfig.conversation_config.agent.prompt.knowledge_base = [
+      {
+        type: "text",
+        id: kb.elevenlabs_kb_id,
+        name: kb.name,
+        usage_mode: "auto",
+      },
+    ];
+
+    //E) Update agent (PATCH)
+    await updateAgent({
+      agentId: duplicatedAgent.agent_id,
+      payload: agentConfig,
+    });
 
     // Create agent
     const { data: agent, error: agentError } = await supabase
@@ -155,9 +155,10 @@ const BASE_AGENTS = {
         agent_description,
         knowledge_base_id,
         elevenlabs_agent_id: duplicatedAgent.agent_id,
-        status: "draft",
+        status: "unassigned",
       })
-      .select(`
+      .select(
+        `
         *,
         agent_templates (
           name,
@@ -169,7 +170,8 @@ const BASE_AGENTS = {
           id,
           name
         )
-      `)
+      `,
+      )
       .single();
 
     if (agentError) throw agentError;
@@ -187,7 +189,6 @@ const BASE_AGENTS = {
   }
 };
 
-
 /**
  * GET /api/agents/user/:user_id
  * Get all agents for a user
@@ -198,7 +199,8 @@ export const getUserAgents = async (req, res) => {
 
     const { data: agents, error } = await supabase
       .from("agents")
-      .select(`
+      .select(
+        `
         *,
         agent_templates (
           name,
@@ -209,7 +211,8 @@ export const getUserAgents = async (req, res) => {
         knowledge_bases (
           name
         )
-      `)
+      `,
+      )
       .eq("user_id", user_id)
       .order("created_at", { ascending: false });
 
@@ -238,7 +241,8 @@ export const getAgentDetails = async (req, res) => {
 
     const { data: agent, error } = await supabase
       .from("agents")
-      .select(`
+      .select(
+        `
         *,
         agent_templates (
           name,
@@ -254,7 +258,8 @@ export const getAgentDetails = async (req, res) => {
           name,
           elevenlabs_kb_id
         )
-      `)
+      `,
+      )
       .eq("agent_id", agent_id)
       .single();
 

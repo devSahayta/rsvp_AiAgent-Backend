@@ -143,6 +143,14 @@ export const createEventWithCsv = async (req, res) => {
       })
       .eq("event_id", event.event_id);
 
+    //update agents status
+    await supabase
+      .from("agents")
+      .update({
+        status: "assigned",
+      })
+      .eq("agent_id", ag.agent_id);
+
     // 3) Parse CSV → gather participants
     const rows = [];
     const headers = [];

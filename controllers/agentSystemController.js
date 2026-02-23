@@ -298,7 +298,7 @@ export const deleteAgentComplete = async (req, res) => {
     // 1️⃣ Check if agent exists
     const { data: agent, error: agentFetchError } = await supabase
       .from("agents")
-      .select("agent_id, knowledge_base_id, agent_name")
+      .select("agent_id, knowledge_base_id, agent_name, elevenlabs_agent_id")
       .eq("agent_id", agent_id)
       .single();
 
@@ -331,6 +331,22 @@ export const deleteAgentComplete = async (req, res) => {
           linked_events: linkedEvents,
         },
       });
+    }
+
+    // 🤖 Delete ElevenLabs agent (if exists)
+    if (agent?.elevenlabs_agent_id) {
+      try {
+        await deleteAgent(agent.elevenlabs_agent_id);
+        console.log(
+          `🗑️ ElevenLabs agent deleted: ${agent.elevenlabs_agent_id}`,
+        );
+      } catch (agentErr) {
+        console.warn(
+          "⚠️ Failed to delete ElevenLabs agent:",
+          agentErr.response?.data || agentErr.message,
+        );
+        // DO NOT throw — event deletion must continue
+      }
     }
 
     // 4️⃣ Safe to delete Knowledge Base (ONLY if NOT linked)
@@ -373,4 +389,4 @@ export const deleteAgentComplete = async (req, res) => {
       error: error.message,
     });
   }
-}; 
+};

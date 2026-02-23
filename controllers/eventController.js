@@ -68,12 +68,6 @@ export const createEventWithCsv = async (req, res) => {
       });
     }
 
-    // if (!event_type || !knowledge_base_id) {
-    //   return res.status(400).json({
-    //     error: "event_type and knowledge_base_id are required",
-    //   });
-    // }
-
     // 1) Upload CSV to Supabase Storage
     const key = `${user_id}/${Date.now()}_${slug(event_name)}.csv`;
     const upload = await supabase.storage
@@ -104,48 +98,6 @@ export const createEventWithCsv = async (req, res) => {
     };
     const event = await createEvent(eventPayload);
 
-    // //A) Fetch KB from DB
-    // const { data: kb, error: kbError } = await supabase
-    //   .from("knowledge_bases")
-    //   .select("*")
-    //   .eq("id", knowledge_base_id)
-    //   .single();
-
-    // if (kbError || !kb) {
-    //   return res.status(400).json({ error: "Invalid knowledge base" });
-    // }
-
-    // //B) Duplicate agent
-    // const baseAgentId = BASE_AGENTS[event_type];
-
-    // if (!baseAgentId) {
-    //   return res.status(400).json({ error: "Invalid Event Type" });
-    // }
-
-    // const duplicatedAgent = await duplicateAgent({
-    //   agentId: baseAgentId,
-    //   name: `${event_name} Agent`,
-    // });
-
-    // //C) Get duplicated agent config
-    // const agentConfig = await getAgent(duplicatedAgent.agent_id);
-
-    // //D) Inject TEXT knowledge base
-    // agentConfig.conversation_config.agent.prompt.knowledge_base = [
-    //   {
-    //     type: "text",
-    //     id: kb.elevenlabs_kb_id,
-    //     name: kb.name,
-    //     usage_mode: "auto",
-    //   },
-    // ];
-
-    // //E) Update agent (PATCH)
-    // await updateAgent({
-    //   agentId: duplicatedAgent.agent_id,
-    //   payload: agentConfig,
-    // });
-
     //Fetch agent
     const { data: ag, error: agError } = await supabase
       .from("agents")
@@ -159,13 +111,24 @@ export const createEventWithCsv = async (req, res) => {
 
     //Fetch agent_template
     const { data: template, error: templateError } = await supabase
-      .from("agents_templates")
+      .from("agent_templates")
       .select("*")
       .eq("template_id", ag.template_id)
       .single();
 
     if (templateError || !template) {
       return res.status(400).json({ error: "No Agent Template Found" });
+    }
+
+    // Fetch KB from DB
+    const { data: kb, error: kbError } = await supabase
+      .from("knowledge_bases")
+      .select("*")
+      .eq("id", ag.knowledge_base_id)
+      .single();
+
+    if (kbError || !kb) {
+      return res.status(400).json({ error: "Invalid knowledge base" });
     }
 
     //F) Update event row
@@ -176,6 +139,7 @@ export const createEventWithCsv = async (req, res) => {
         knowledge_base_id: ag.knowledge_base_id,
         agent_id: ag.agent_id,
         event_type: template.category,
+        elevenlabs_kb_id: kb.elevenlabs_kb_id,
       })
       .eq("event_id", event.event_id);
 

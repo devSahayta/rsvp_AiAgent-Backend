@@ -23,7 +23,7 @@ export const elevenlabsApi = {
     } catch (error) {
       console.error(
         "❌ Error fetching batch:",
-        error.response?.data || error.message
+        error.response?.data || error.message,
       );
       throw error;
     }
@@ -42,13 +42,13 @@ export const elevenlabsApi = {
         },
       });
       console.log(
-        `✅ Found ${response.data.conversations.length} conversations`
+        `✅ Found ${response.data.conversations.length} conversations`,
       );
       return response.data.conversations;
     } catch (error) {
       console.error(
         "❌ Error listing conversations:",
-        error.response?.data || error.message
+        error.response?.data || error.message,
       );
       throw error;
     }
@@ -64,7 +64,7 @@ export const createTextKnowledgeBase = async ({ name, text }) => {
   const res = await axios.post(
     `${BASE_URL}/knowledge-base/text`,
     { name, text },
-    { headers }
+    { headers },
   );
 
   return res.data; // { id, name }
@@ -94,7 +94,7 @@ export const duplicateAgent = async ({ agentId, name }) => {
   const res = await axios.post(
     `${BASE_URL}/agents/${agentId}/duplicate`,
     { name },
-    { headers }
+    { headers },
   );
   return res.data; // returns new agent object
 };
@@ -111,4 +111,35 @@ export const updateAgent = async ({ agentId, payload }) => {
 export const deleteAgent = async (agentId) => {
   await axios.delete(`${BASE_URL}/agents/${agentId}`, { headers });
   return true; // 204
+};
+
+// Outbound voice call (Test Voice Agent)
+export const outboundCall = async ({
+  agentId,
+  agentPhoneNumberId,
+  toNumber,
+}) => {
+  try {
+    console.log("📞 Initiating ElevenLabs outbound call...");
+
+    const response = await axios.post(
+      `${BASE_URL}/twilio/outbound-call`,
+      {
+        agent_id: agentId,
+        agent_phone_number_id: agentPhoneNumberId,
+        to_number: toNumber,
+      },
+      { headers },
+    );
+
+    console.log("✅ ElevenLabs call initiated:", response.data);
+
+    return response.data;
+  } catch (error) {
+    console.error(
+      "❌ ElevenLabs outbound call error:",
+      error.response?.data || error.message,
+    );
+    throw error;
+  }
 };

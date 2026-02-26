@@ -425,29 +425,106 @@ export const testChatAgent = async (req, res) => {
       aiResponse.reply?.substring(0, 100),
     );
 
-    // 4. Log test interaction (for user's review)
-    try {
-      await supabase.from("agent_test_sessions").insert({
+    // 4. Log or Update test interaction (Backend-managed single session)
+try {
+  // 🔍 Check if an active session already exists for this user + agent
+  const { data: existingSession, error: sessionFetchError } = await supabase
+    .from("agent_test_sessions")
+    .select("test_session_id, test_transcript")
+    .eq("agent_id", agent_id)
+    .eq("user_id", user_id || "anonymous")
+    .eq("test_type", "chat")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle(); // ✅ Important (no error if not found)
+
+  if (sessionFetchError) {
+    console.error("❌ Session fetch error:", sessionFetchError);
+  }
+
+  // 🆕 FIRST MESSAGE → Create new session (DB auto-generates UUID)
+  if (!existingSession) {
+    const { data: newSession, error: insertError } = await supabase
+      .from("agent_test_sessions")
+      .insert({
         agent_id,
         user_id: user_id || "anonymous",
         test_type: "chat",
-        test_status: "completed",
-        test_transcript: JSON.stringify({
-          user_message: message,
-          agent_response: aiResponse.reply,
-          timestamp: new Date().toISOString(),
-        }),
+        test_status: "active",
+        test_transcript: JSON.stringify([
+          {
+            role: "user",
+            message: message,
+            timestamp: new Date().toISOString(),
+          },
+          {
+            role: "assistant",
+            message: aiResponse.reply,
+            timestamp: new Date().toISOString(),
+          },
+        ]),
         test_data_collected: {
-          question: message,
-          answer: aiResponse.reply,
+          conversation_started: true,
         },
+        started_at: new Date().toISOString(),
         completed_at: new Date().toISOString(),
-      });
-      console.log(":white_check_mark: Test session logged");
-    } catch (logError) {
-      console.warn(":warning:  Failed to log test session:", logError.message);
-      // Don't fail the request if logging fails
+      })
+      .select("test_session_id") // 🔥 Get auto-generated ID
+      .single();
+
+    if (insertError) {
+      console.error("❌ Insert session error:", insertError);
+    } else {
+      console.log("🆕 New test session created:", newSession.test_session_id);
     }
+  } else {
+    // 📝 EXISTING SESSION → Append messages to transcript
+    let transcript = [];
+
+    try {
+      transcript = JSON.parse(existingSession.test_transcript || "[]");
+    } catch (e) {
+      console.warn("⚠️ Transcript parse failed, resetting:", e.message);
+      transcript = [];
+    }
+
+    transcript.push(
+      {
+        role: "user",
+        message: message,
+        timestamp: new Date().toISOString(),
+      },
+      {
+        role: "assistant",
+        message: aiResponse.reply,
+        timestamp: new Date().toISOString(),
+      }
+    );
+
+    const { error: updateError } = await supabase
+      .from("agent_test_sessions")
+      .update({
+        test_transcript: JSON.stringify(transcript),
+        test_status: "active",
+        updated_at: new Date().toISOString(),
+        completed_at: new Date().toISOString(),
+      })
+      .eq("test_session_id", existingSession.test_session_id);
+
+    if (updateError) {
+      console.error("❌ Update session error:", updateError);
+    } else {
+      console.log(
+        "📝 Session updated (single record):",
+        existingSession.test_session_id
+      );
+    }
+  }
+
+  console.log("✅ Backend-managed single test session working");
+} catch (logError) {
+  console.warn("⚠️ Failed to log test session:", logError.message);
+}
 
     // 5. Return response
     res.json({

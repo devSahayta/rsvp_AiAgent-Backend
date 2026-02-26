@@ -187,7 +187,7 @@ export const getTestSession = async (req, res) => {
 //get all test session data
 export const getUserTestSessions = async (req, res) => {
   try {
-    const { user_id } = req.body;
+    const { user_id } = req.query;
 
     if (!user_id) {
       return res.status(400).json({
@@ -204,9 +204,13 @@ export const getUserTestSessions = async (req, res) => {
     /* -------------------------------------------------- */
     /* Fetch All Test Sessions For User */
     /* -------------------------------------------------- */
-    const { data: testSessions, error } = await supabase
+    const {
+      data: testSessions,
+      error,
+      count,
+    } = await supabase
       .from("agent_test_sessions")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("user_id", user_id)
       .order("created_at", { ascending: false }) // latest first
       .range(from, to);

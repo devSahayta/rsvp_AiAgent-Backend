@@ -20,24 +20,20 @@ const router = express.Router();
 router.get("/templates", getAgentTemplates);
 router.get("/templates/:template_id", getAgentTemplate);
 
-//CRUD routes for user agents
-router.post("/create", createAgent);
-router.get("/user/:user_id", getUserAgents);
-router.get("/:agent_id", getAgentDetails);
-router.delete("/:agent_id", deleteAgentComplete);
-
-//For Testing Agents
-
-// For Voice Agent
+// For Testing Agents
 router.post("/:agent_id/test-voice", testVoiceAgent);
-
-//test route for chatbot
 router.post("/:agent_id/test-chat", testChatAgent);
 
-router.get("/test-sessions/:session_id", getTestSession);
 router.get("/test-sessions", getUserTestSessions);
-
-//sync voice test status
+router.get("/test-sessions/:session_id", getTestSession);
 router.post("/test-sessions/sync/:conversation_id", syncVoiceTestStatus);
+
+// CRUD routes
+router.post("/create", createAgent);
+router.get("/user/:user_id", getUserAgents);
+
+// ALWAYS KEEP THIS LAST
+router.get("/:agent_id", getAgentDetails);
+router.delete("/:agent_id", deleteAgentComplete);
 
 export default router;

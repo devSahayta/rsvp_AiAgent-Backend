@@ -1,7 +1,7 @@
 // controllers/agentTestController.js
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
-import { outboundCall } from "../utils/elevenlabsApi.js";
+import { submitTestBatchCall } from "../utils/elevenlabsApi.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
 
 const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
@@ -9,9 +9,7 @@ const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
 export const testVoiceAgent = async (req, res) => {
   try {
     const { agent_id } = req.params;
-    const { to_number } = req.body;
-
-    // console.log({ ELEVENLABS_AGENT_PHONE_NUMBER_ID, agent_id, to_number });
+    const { to_number, eventName } = req.body;
 
     if (!to_number) {
       return res.status(400).json({
@@ -36,17 +34,10 @@ export const testVoiceAgent = async (req, res) => {
       });
     }
 
-    if (!agent.is_active) {
+    if (!agent.is_active || !agent.voice_enabled) {
       return res.status(400).json({
         success: false,
-        message: "Agent is not active",
-      });
-    }
-
-    if (!agent.voice_enabled) {
-      return res.status(400).json({
-        success: false,
-        message: "Voice is not enabled for this agent",
+        message: "Voice not enabled or agent inactive",
       });
     }
 
@@ -57,27 +48,32 @@ export const testVoiceAgent = async (req, res) => {
       });
     }
 
+    const dynamic_variables = {
+      eventId: String(agent_id),
+      eventName: String(eventName),
+    };
+
     /* -------------------------------------------------- */
-    /* 2️⃣ Call ElevenLabs via Utility */
+    /* 2️⃣ Submit Batch Call (Single Test Mode) */
     /* -------------------------------------------------- */
-    const elevenResponse = await outboundCall({
+    const elevenResponse = await submitTestBatchCall({
       agentId: agent.elevenlabs_agent_id,
       agentPhoneNumberId: ELEVENLABS_AGENT_PHONE_NUMBER_ID,
       toNumber: to_number,
+      dynamicVariables: dynamic_variables,
     });
 
     if (!elevenResponse.success) {
       return res.status(500).json({
         success: false,
-        message: "Failed to initiate ElevenLabs call",
+        message: "Failed to initiate ElevenLabs test batch call",
       });
     }
 
     /* -------------------------------------------------- */
     /* 3️⃣ Create Test Session */
     /* -------------------------------------------------- */
-
-    const { data: agentData, error: testError } = await supabase
+    const { data: testSession, error: testError } = await supabase
       .from("agent_test_sessions")
       .insert([
         {
@@ -85,8 +81,8 @@ export const testVoiceAgent = async (req, res) => {
           user_id: agent.user_id,
           test_type: "voice",
           test_phone_number: to_number,
-          test_status: "initiated",
-          conversation_id: elevenResponse.conversation_id,
+          test_status: "queued",
+          batch_id: elevenResponse.batch_id,
           started_at: new Date(),
           created_at: new Date(),
         },
@@ -99,7 +95,7 @@ export const testVoiceAgent = async (req, res) => {
     }
 
     /* -------------------------------------------------- */
-    /* 4️⃣ Update Agent Counters */
+    /* 4️⃣ Update Agent Counters + Save Batch ID */
     /* -------------------------------------------------- */
     await supabase
       .from("agents")
@@ -107,6 +103,7 @@ export const testVoiceAgent = async (req, res) => {
         total_tests: agent.total_tests + 1,
         total_calls: agent.total_calls + 1,
         last_used_at: new Date(),
+        // last_batch_id: elevenResponse.batch_id, // 🔥 NEW
       })
       .eq("agent_id", agent_id);
 
@@ -115,13 +112,12 @@ export const testVoiceAgent = async (req, res) => {
     /* -------------------------------------------------- */
     return res.status(200).json({
       success: true,
-      message: "Voice test initiated successfully",
-      conversation_id: elevenResponse.conversation_id,
-      callSid: elevenResponse.callSid,
-      test_session_id: agentData.test_session_id,
+      message: "Voice test batch initiated successfully",
+      batch_id: elevenResponse.batch_id,
+      test_session_id: testSession?.test_session_id,
     });
   } catch (err) {
-    console.error("Voice test error:", err.response?.data || err.message);
+    console.error("Voice test batch error:", err);
 
     return res.status(500).json({
       success: false,
@@ -240,23 +236,23 @@ export const getUserTestSessions = async (req, res) => {
   }
 };
 
-// Sync voice test status
+// Sync voice test status (Batch Mode)
 export const syncVoiceTestStatus = async (req, res) => {
   try {
-    const { conversation_id } = req.params;
+    const { batch_id } = req.params;
 
-    if (!conversation_id) {
+    if (!batch_id) {
       return res.status(400).json({
         success: false,
-        message: "Conversation ID is required",
+        message: "Batch ID is required",
       });
     }
 
     /* -------------------------------------------------- */
-    /* 1️⃣ Get Conversation From ElevenLabs */
+    /* 1️⃣ Fetch Batch From ElevenLabs */
     /* -------------------------------------------------- */
     const response = await axios.get(
-      `https://api.elevenlabs.io/v1/convai/conversations/${conversation_id}`,
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${batch_id}`,
       {
         headers: {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
@@ -264,32 +260,74 @@ export const syncVoiceTestStatus = async (req, res) => {
       },
     );
 
-    const conversation = response.data;
+    const batch = response.data;
+
+    if (!batch || !batch.recipients || batch.recipients.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No recipients found in batch",
+      });
+    }
+
+    // Since test = single recipient
+    const recipient = batch.recipients[0];
 
     /* -------------------------------------------------- */
     /* 2️⃣ Map Status */
     /* -------------------------------------------------- */
     let mappedStatus = "processing";
 
-    if (conversation.status === "completed") {
+    if (recipient.status === "completed") {
       mappedStatus = "completed";
-    } else if (conversation.status === "failed") {
+    } else if (recipient.status === "failed" || recipient.status === "error") {
       mappedStatus = "failed";
+    } else if (
+      recipient.status === "pending" ||
+      recipient.status === "scheduled"
+    ) {
+      mappedStatus = "queued";
     }
 
     /* -------------------------------------------------- */
-    /* 3️⃣ Update Test Session */
+    /* 3️⃣ If Conversation Exists → Fetch Transcript */
+    /* -------------------------------------------------- */
+    let transcript = null;
+    let duration = null;
+
+    if (recipient.conversation_id) {
+      try {
+        const convoRes = await axios.get(
+          `https://api.elevenlabs.io/v1/convai/conversations/${recipient.conversation_id}`,
+          {
+            headers: {
+              "xi-api-key": process.env.ELEVENLABS_API_KEY,
+            },
+          },
+        );
+
+        const conversation = convoRes.data;
+
+        transcript = conversation.transcript || null;
+        duration = conversation.metadata?.call_duration_secs || null;
+      } catch (err) {
+        console.warn("⚠️ Failed to fetch conversation details");
+      }
+    }
+
+    /* -------------------------------------------------- */
+    /* 4️⃣ Update Test Session */
     /* -------------------------------------------------- */
     const { data, error } = await supabase
       .from("agent_test_sessions")
       .update({
         test_status: mappedStatus,
-        completed_at: new Date(),
-        duration_seconds: conversation.metadata?.call_duration_secs || null,
-        test_data_collected: conversation.transcript || null,
+        conversation_id: recipient.conversation_id || null,
+        duration_seconds: duration,
+        test_transcript: transcript,
+        completed_at: mappedStatus === "completed" ? new Date() : null,
         updated_at: new Date(),
       })
-      .eq("conversation_id", conversation_id)
+      .eq("batch_id", batch_id)
       .select()
       .single();
 
@@ -303,15 +341,22 @@ export const syncVoiceTestStatus = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Test session synced successfully",
+      message: "Test session synced successfully (Batch Mode)",
       data,
+      debug: {
+        batch_status: batch.status,
+        recipient_status: recipient.status,
+      },
     });
   } catch (err) {
-    console.error("Sync voice test error:", err.response?.data || err.message);
+    console.error(
+      "Sync voice test batch error:",
+      err.response?.data || err.message,
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to sync voice test",
+      message: "Failed to sync voice test batch",
     });
   }
 };
@@ -430,32 +475,72 @@ export const testChatAgent = async (req, res) => {
     );
 
     // 4. Log or Update test interaction (Backend-managed single session)
-try {
-  // 🔍 Check if an active session already exists for this user + agent
-  const { data: existingSession, error: sessionFetchError } = await supabase
-    .from("agent_test_sessions")
-    .select("test_session_id, test_transcript")
-    .eq("agent_id", agent_id)
-    .eq("user_id", user_id || "anonymous")
-    .eq("test_type", "chat")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle(); // ✅ Important (no error if not found)
+    try {
+      // 🔍 Check if an active session already exists for this user + agent
+      const { data: existingSession, error: sessionFetchError } = await supabase
+        .from("agent_test_sessions")
+        .select("test_session_id, test_transcript")
+        .eq("agent_id", agent_id)
+        .eq("user_id", user_id || "anonymous")
+        .eq("test_type", "chat")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(); // ✅ Important (no error if not found)
 
-  if (sessionFetchError) {
-    console.error("❌ Session fetch error:", sessionFetchError);
-  }
+      if (sessionFetchError) {
+        console.error("❌ Session fetch error:", sessionFetchError);
+      }
 
-  // 🆕 FIRST MESSAGE → Create new session (DB auto-generates UUID)
-  if (!existingSession) {
-    const { data: newSession, error: insertError } = await supabase
-      .from("agent_test_sessions")
-      .insert({
-        agent_id,
-        user_id: user_id || "anonymous",
-        test_type: "chat",
-        test_status: "active",
-        test_transcript: JSON.stringify([
+      // 🆕 FIRST MESSAGE → Create new session (DB auto-generates UUID)
+      if (!existingSession) {
+        const { data: newSession, error: insertError } = await supabase
+          .from("agent_test_sessions")
+          .insert({
+            agent_id,
+            user_id: user_id || "anonymous",
+            test_type: "chat",
+            test_status: "active",
+            test_transcript: JSON.stringify([
+              {
+                role: "user",
+                message: message,
+                timestamp: new Date().toISOString(),
+              },
+              {
+                role: "assistant",
+                message: aiResponse.reply,
+                timestamp: new Date().toISOString(),
+              },
+            ]),
+            test_data_collected: {
+              conversation_started: true,
+            },
+            started_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          })
+          .select("test_session_id") // 🔥 Get auto-generated ID
+          .single();
+
+        if (insertError) {
+          console.error("❌ Insert session error:", insertError);
+        } else {
+          console.log(
+            "🆕 New test session created:",
+            newSession.test_session_id,
+          );
+        }
+      } else {
+        // 📝 EXISTING SESSION → Append messages to transcript
+        let transcript = [];
+
+        try {
+          transcript = JSON.parse(existingSession.test_transcript || "[]");
+        } catch (e) {
+          console.warn("⚠️ Transcript parse failed, resetting:", e.message);
+          transcript = [];
+        }
+
+        transcript.push(
           {
             role: "user",
             message: message,
@@ -466,69 +551,32 @@ try {
             message: aiResponse.reply,
             timestamp: new Date().toISOString(),
           },
-        ]),
-        test_data_collected: {
-          conversation_started: true,
-        },
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      })
-      .select("test_session_id") // 🔥 Get auto-generated ID
-      .single();
+        );
 
-    if (insertError) {
-      console.error("❌ Insert session error:", insertError);
-    } else {
-      console.log("🆕 New test session created:", newSession.test_session_id);
-    }
-  } else {
-    // 📝 EXISTING SESSION → Append messages to transcript
-    let transcript = [];
+        const { error: updateError } = await supabase
+          .from("agent_test_sessions")
+          .update({
+            test_transcript: JSON.stringify(transcript),
+            test_status: "active",
+            updated_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("test_session_id", existingSession.test_session_id);
 
-    try {
-      transcript = JSON.parse(existingSession.test_transcript || "[]");
-    } catch (e) {
-      console.warn("⚠️ Transcript parse failed, resetting:", e.message);
-      transcript = [];
-    }
-
-    transcript.push(
-      {
-        role: "user",
-        message: message,
-        timestamp: new Date().toISOString(),
-      },
-      {
-        role: "assistant",
-        message: aiResponse.reply,
-        timestamp: new Date().toISOString(),
+        if (updateError) {
+          console.error("❌ Update session error:", updateError);
+        } else {
+          console.log(
+            "📝 Session updated (single record):",
+            existingSession.test_session_id,
+          );
+        }
       }
-    );
 
-    const { error: updateError } = await supabase
-      .from("agent_test_sessions")
-      .update({
-        test_transcript: JSON.stringify(transcript),
-        test_status: "active",
-        updated_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      })
-      .eq("test_session_id", existingSession.test_session_id);
-
-    if (updateError) {
-      console.error("❌ Update session error:", updateError);
-    } else {
-      console.log(
-        "📝 Session updated (single record):",
-        existingSession.test_session_id
-      );
+      console.log("✅ Backend-managed single test session working");
+    } catch (logError) {
+      console.warn("⚠️ Failed to log test session:", logError.message);
     }
-  }
-
-  console.log("✅ Backend-managed single test session working");
-} catch (logError) {
-  console.warn("⚠️ Failed to log test session:", logError.message);
-}
 
     // 5. Return response
     res.json({

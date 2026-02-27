@@ -26,7 +26,7 @@ router.post("/:agent_id/test-chat", testChatAgent);
 
 router.get("/test-sessions", getUserTestSessions);
 router.get("/test-sessions/:session_id", getTestSession);
-router.post("/test-sessions/sync/:conversation_id", syncVoiceTestStatus);
+router.post("/test-sessions/sync/:batch_id", syncVoiceTestStatus);
 
 // CRUD routes
 router.post("/create", createAgent);

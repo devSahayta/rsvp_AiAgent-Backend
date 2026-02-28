@@ -9,7 +9,7 @@ const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
 export const testVoiceAgent = async (req, res) => {
   try {
     const { agent_id } = req.params;
-    const { to_number, eventName } = req.body;
+    const { to_number } = req.body;
 
     if (!to_number) {
       return res.status(400).json({
@@ -48,9 +48,16 @@ export const testVoiceAgent = async (req, res) => {
       });
     }
 
+    if (!agent.event_title) {
+      return res.status(400).json({
+        success: false,
+        message: "Event Title not defined",
+      });
+    }
+
     const dynamic_variables = {
       eventId: String(agent_id),
-      eventName: String(eventName),
+      eventName: String(agent.event_title),
     };
 
     /* -------------------------------------------------- */

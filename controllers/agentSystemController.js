@@ -7,7 +7,7 @@ import {
   deleteAgent,
 } from "../utils/elevenlabsApi.js";
 /**
- * GET /api/agents/templates
+ * GET /api/agent-system/templates
  * Get all available agent templates
  */
 export const getAgentTemplates = async (req, res) => {
@@ -35,7 +35,7 @@ export const getAgentTemplates = async (req, res) => {
 };
 
 /**
- * GET /api/agents/templates/:template_id
+ * GET /api/agent-system/templates/:template_id
  * Get single agent template with full details
  */
 export const getAgentTemplate = async (req, res) => {
@@ -251,7 +251,8 @@ export const getAgentDetails = async (req, res) => {
           category,
           icon_url,
           cover_image_url,
-          config
+          config,
+          preview_image_url
         ),
         knowledge_bases (
           id,

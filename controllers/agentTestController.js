@@ -2,6 +2,7 @@
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
 import { outboundCall } from "../utils/elevenlabsApi.js";
+import { sendToClaude } from "../utils/claudeClient.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
 
 const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
@@ -318,17 +319,13 @@ export const syncVoiceTestStatus = async (req, res) => {
 
 /**
  * POST /api/agent-system/:agent_id/test-chat
- * Test chatbot in browser using existing AI Decision Engine
- *
- * This endpoint uses your EXISTING aiDecisionEngine.js without ANY modifications!
- * It just wraps it with test-specific context that won't affect production.
+ * Test chatbot with FULL RSVP flow using mode flag
  */
 export const testChatAgent = async (req, res) => {
   try {
     const { agent_id } = req.params;
-    const { user_id, message } = req.body;
+    const { user_id, message, conversation_state } = req.body;
 
-    // Validate input
     if (!message?.trim()) {
       return res.status(400).json({
         success: false,
@@ -336,126 +333,165 @@ export const testChatAgent = async (req, res) => {
       });
     }
 
-    console.log(
-      ":telephone_receiver: TEST CHAT - Agent:",
-      agent_id,
-      "Message:",
-      message,
-    );
+    console.log("📞 TEST CHAT - Agent:", agent_id, "Message:", message);
 
-    // 1. Get agent details with KB
+    // Get agent details
     const { data: agent, error: agentError } = await supabase
       .from("agents")
-      .select(
-        `
-          *,
-          agent_templates (
-          name,
-          config
-          ),
-          knowledge_bases (
-          id,
-          name,
-          elevenlabs_kb_id
-          )
-          `,
-      )
+      .select(`
+        *,
+        agent_templates (name, config),
+        knowledge_bases (id, name, elevenlabs_kb_id)
+      `)
       .eq("agent_id", agent_id)
       .single();
 
     if (agentError || !agent) {
-      console.error(":x: Agent not found:", agentError);
+      console.error("❌ Agent not found:", agentError);
       return res.status(404).json({
         success: false,
         error: "Agent not found",
       });
     }
 
-    console.log(":white_check_mark: Agent found:", agent.agent_name);
-    console.log(":books: KB ID:", agent.knowledge_base_id);
+    console.log("✅ Agent found:", agent.agent_name);
 
-    // 2. Build context for aiDecisionEngine (same structure as production)
-    const context = {
-      // User message
-      userMessage: message,
+    // Build or restore context
+    let context;
+    
+    if (conversation_state && conversation_state.callStatus) {
+      console.log("🔄 Continuing conversation from state:", conversation_state.callStatus);
+      context = {
+        ...conversation_state,
+        userMessage: message,
+      };
+    } else {
+      console.log("🆕 Starting fresh conversation");
+      context = {
+        userMessage: message,
+        callStatus: "awaiting_rsvp",
+        participant: {
+          participant_id: "test-user-" + Date.now(),
+          full_name: "Test User",
+          phone: "+919999999999",
+        },
+        convo: {
+          rsvp_status: null,
+          number_of_guests: null,
+          notes: null,
+          proof_uploaded: false,
+        },
+        cache: {},
+        event: {
+          event_id: "test-event-" + Date.now(),
+          event_name: "Test Event",
+          knowledge_base_id: agent.knowledge_base_id,
+        },
+        incomingMediaUrl: null,
+        uploadedDocuments: [],
+      };
+    }
 
-      // Call status: Use "completed" state for Q&A mode (bypasses RSVP flow)
-      callStatus: "completed",
+    console.log("🔄 Calling aiDecisionEngine with TEST mode...");
 
-      // Mock participant (test user)
-      participant: {
-        participant_id: "test-user-" + Date.now(),
-        full_name: "Test User",
-        phone: "+919999999999",
-      },
+    // Call with mode: "test"
+    let aiResponse = await decideNextStep(context, { mode: "test" });
 
-      // Mock conversation state (empty for test)
+    // ✅ SKIP DOCUMENT STATES IN TEST MODE
+    const documentStates = [
+      "awaiting_doc_person_name",
+      "awaiting_doc_role",
+      "awaiting_id_proof",
+      "awaiting_travel_docs_choice",
+      "awaiting_travel_doc_type",
+      "awaiting_travel_doc_direction",
+      "awaiting_travel_doc_upload",
+      "awaiting_arrival_manual_date",
+      "awaiting_arrival_manual_time",
+      "awaiting_return_choice",
+      "awaiting_return_manual_date",
+      "awaiting_return_manual_time",
+      "awaiting_more_attendees",
+      "awaiting_additional_attendee_name",
+    ];
+
+    if (documentStates.includes(aiResponse.nextState)) {
+      console.log("📝 TEST MODE - Skipping document collection state:", aiResponse.nextState);
+      
+      aiResponse = {
+        reply: aiResponse.reply + "\n\n📝 Note: Document collection is not available in test mode. Your RSVP has been recorded!\n\nFeel free to ask me anything about the wedding - venue, dates, dress code, schedule, etc! 😊",
+        nextState: "completed",
+        actions: { updateDB: false, fields: {} },
+      };
+    }
+
+    console.log("✅ AI Response:", aiResponse.reply?.substring(0, 100));
+    console.log("📍 Next State:", aiResponse.nextState);
+
+    // Update context
+    const updatedContext = {
+      ...context,
+      callStatus: aiResponse.nextState,
       convo: {
-        rsvp_status: null,
-        number_of_guests: null,
-        notes: null,
-        proof_uploaded: false,
+        ...context.convo,
+        ...(aiResponse.actions?.fields || {}),
       },
-
-      // Empty cache (no document collection in test)
-      cache: {},
-
-      // Event with KB link (CRITICAL for KB fetching)
-      event: {
-        event_id: "test-event-" + Date.now(),
-        event_name: "Test Event",
-        knowledge_base_id: agent.knowledge_base_id, // :white_check_mark: This makes KB work!
-      },
-
-      // No media in chat test
-      incomingMediaUrl: null,
-      uploadedDocuments: [],
+      cache: aiResponse.actions?.cacheUpdate 
+        ? { currentDoc: aiResponse.actions.cacheUpdate }
+        : context.cache,
     };
 
-    console.log(
-      ":arrows_counterclockwise: Calling aiDecisionEngine with context...",
-    );
+    // Final response (no disclaimer needed - it's in frontend UI)
+    let finalResponse = aiResponse.reply;
 
-    // 3. Call existing AI Decision Engine
-    // This will:
-    // - Detect if message needs wedding info (venue, date, etc.)
-    // - Fetch KB content via getWeddingInfo(event.knowledge_base_id)
-    // - Use Claude API with proper prompts
-    // - Return intelligent response
-    const aiResponse = await decideNextStep(context);
+    // Log test session
+    try {
+      const { data: existingSession } = await supabase
+        .from("agent_test_sessions")
+        .select("test_session_id, test_transcript")
+        .eq("agent_id", agent_id)
+        .eq("user_id", user_id || "anonymous")
+        .eq("test_type", "chat")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-    console.log(
-      ":white_check_mark: AI Response received:",
-      aiResponse.reply?.substring(0, 100),
-    );
+      if (!existingSession) {
+        await supabase.from("agent_test_sessions").insert({
+          agent_id,
+          user_id: user_id || "anonymous",
+          test_type: "chat",
+          test_status: "active",
+          test_transcript: JSON.stringify([
+            {
+              role: "user",
+              message: message,
+              timestamp: new Date().toISOString(),
+            },
+            {
+              role: "assistant",
+              message: finalResponse,
+              timestamp: new Date().toISOString(),
+            },
+          ]),
+          test_data_collected: {
+            current_state: aiResponse.nextState,
+            rsvp_status: updatedContext.convo.rsvp_status,
+            guest_count: updatedContext.convo.number_of_guests,
+          },
+          started_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+        });
+        console.log("🆕 New test session created");
+      } else {
+        let transcript = [];
+        try {
+          transcript = JSON.parse(existingSession.test_transcript || "[]");
+        } catch (e) {
+          transcript = [];
+        }
 
-    // 4. Log or Update test interaction (Backend-managed single session)
-try {
-  // 🔍 Check if an active session already exists for this user + agent
-  const { data: existingSession, error: sessionFetchError } = await supabase
-    .from("agent_test_sessions")
-    .select("test_session_id, test_transcript")
-    .eq("agent_id", agent_id)
-    .eq("user_id", user_id || "anonymous")
-    .eq("test_type", "chat")
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle(); // ✅ Important (no error if not found)
-
-  if (sessionFetchError) {
-    console.error("❌ Session fetch error:", sessionFetchError);
-  }
-
-  // 🆕 FIRST MESSAGE → Create new session (DB auto-generates UUID)
-  if (!existingSession) {
-    const { data: newSession, error: insertError } = await supabase
-      .from("agent_test_sessions")
-      .insert({
-        agent_id,
-        user_id: user_id || "anonymous",
-        test_type: "chat",
-        test_status: "active",
-        test_transcript: JSON.stringify([
+        transcript.push(
           {
             role: "user",
             message: message,
@@ -463,85 +499,48 @@ try {
           },
           {
             role: "assistant",
-            message: aiResponse.reply,
+            message: finalResponse,
             timestamp: new Date().toISOString(),
-          },
-        ]),
-        test_data_collected: {
-          conversation_started: true,
-        },
-        started_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      })
-      .select("test_session_id") // 🔥 Get auto-generated ID
-      .single();
+          }
+        );
 
-    if (insertError) {
-      console.error("❌ Insert session error:", insertError);
-    } else {
-      console.log("🆕 New test session created:", newSession.test_session_id);
-    }
-  } else {
-    // 📝 EXISTING SESSION → Append messages to transcript
-    let transcript = [];
+        await supabase
+          .from("agent_test_sessions")
+          .update({
+            test_transcript: JSON.stringify(transcript),
+            test_data_collected: {
+              current_state: aiResponse.nextState,
+              rsvp_status: updatedContext.convo.rsvp_status,
+              guest_count: updatedContext.convo.number_of_guests,
+            },
+            updated_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("test_session_id", existingSession.test_session_id);
 
-    try {
-      transcript = JSON.parse(existingSession.test_transcript || "[]");
-    } catch (e) {
-      console.warn("⚠️ Transcript parse failed, resetting:", e.message);
-      transcript = [];
-    }
-
-    transcript.push(
-      {
-        role: "user",
-        message: message,
-        timestamp: new Date().toISOString(),
-      },
-      {
-        role: "assistant",
-        message: aiResponse.reply,
-        timestamp: new Date().toISOString(),
+        console.log("📝 Session updated");
       }
-    );
-
-    const { error: updateError } = await supabase
-      .from("agent_test_sessions")
-      .update({
-        test_transcript: JSON.stringify(transcript),
-        test_status: "active",
-        updated_at: new Date().toISOString(),
-        completed_at: new Date().toISOString(),
-      })
-      .eq("test_session_id", existingSession.test_session_id);
-
-    if (updateError) {
-      console.error("❌ Update session error:", updateError);
-    } else {
-      console.log(
-        "📝 Session updated (single record):",
-        existingSession.test_session_id
-      );
+    } catch (logError) {
+      console.warn("⚠️ Failed to log test session:", logError.message);
     }
-  }
 
-  console.log("✅ Backend-managed single test session working");
-} catch (logError) {
-  console.warn("⚠️ Failed to log test session:", logError.message);
-}
-
-    // 5. Return response
+    // Return response
     res.json({
       success: true,
-      response: aiResponse.reply,
+      response: finalResponse,
+      conversation_state: updatedContext,
       metadata: {
         agent_name: agent.agent_name,
         used_kb: !!agent.knowledge_base_id,
         kb_name: agent.knowledge_bases?.name,
+        current_state: aiResponse.nextState,
+        rsvp_status: updatedContext.convo.rsvp_status,
+        guest_count: updatedContext.convo.number_of_guests,
       },
     });
+
   } catch (error) {
-    console.error(":x: Chat test error:", error);
+    console.error("❌ Chat test error:", error);
     res.status(500).json({
       success: false,
       error: "Failed to process chat message",

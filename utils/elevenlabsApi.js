@@ -143,3 +143,83 @@ export const outboundCall = async ({
     throw error;
   }
 };
+
+// Batch voice call (Single Test Mode)
+export const submitTestBatchCall = async ({
+  agentId,
+  agentPhoneNumberId,
+  toNumber,
+  dynamicVariables = {},
+}) => {
+  try {
+    console.log("📞 Initiating ElevenLabs TEST batch call...");
+
+    // Format phone to E.164
+    let formattedPhone = String(toNumber).trim();
+    if (!formattedPhone.startsWith("+")) {
+      formattedPhone = "+" + formattedPhone;
+    }
+
+    const scheduledUnix = Math.floor(Date.now() / 1000) + 10;
+
+    const payload = {
+      call_name: `test-${Date.now()}`,
+      agent_id: agentId,
+      agent_phone_number_id: agentPhoneNumberId,
+      whatsapp_params: null,
+      scheduled_time_unix: scheduledUnix,
+      recipients: [
+        {
+          id: "test-user",
+          phone_number: formattedPhone,
+          conversation_initiation_client_data: {
+            conversation_config_override: {
+              agent: {
+                prompt: null,
+                first_message: null,
+                language: null,
+              },
+              tts: {
+                voice_id: null,
+              },
+            },
+            dynamic_variables: dynamicVariables,
+          },
+        },
+      ],
+    };
+
+    console.log("📦 TEST BATCH PAYLOAD:");
+    console.log(JSON.stringify(payload, null, 2));
+
+    const response = await fetch(
+      "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    const data = await response.json();
+
+    console.log("📥 ElevenLabs Test Batch Response:", data);
+
+    if (!response.ok) {
+      return { success: false, error: data };
+    }
+
+    return {
+      success: true,
+      batch_id: data.id,
+      batch_status: data.status,
+      full_response: data,
+    };
+  } catch (error) {
+    console.error("❌ Test Batch Call Error:", error);
+    return { success: false, error };
+  }
+};

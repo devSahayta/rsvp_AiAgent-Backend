@@ -1,26 +1,19 @@
 // controllers/agentTestController.js
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
-import { outboundCall } from "../utils/elevenlabsApi.js";
-import { sendToClaude } from "../utils/claudeClient.js";
+import { submitTestBatchCall } from "../utils/elevenlabsApi.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
-
 const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
-
 export const testVoiceAgent = async (req, res) => {
   try {
     const { agent_id } = req.params;
     const { to_number } = req.body;
-
-    // console.log({ ELEVENLABS_AGENT_PHONE_NUMBER_ID, agent_id, to_number });
-
     if (!to_number) {
       return res.status(400).json({
         success: false,
         message: "Phone number is required",
       });
     }
-
     /* -------------------------------------------------- */
     /* 1️⃣ Fetch Agent */
     /* -------------------------------------------------- */
@@ -29,56 +22,53 @@ export const testVoiceAgent = async (req, res) => {
       .select("*")
       .eq("agent_id", agent_id)
       .single();
-
     if (error || !agent) {
       return res.status(404).json({
         success: false,
         message: "Agent not found",
       });
     }
-
-    if (!agent.is_active) {
+    if (!agent.is_active || !agent.voice_enabled) {
       return res.status(400).json({
         success: false,
-        message: "Agent is not active",
+        message: "Voice not enabled or agent inactive",
       });
     }
-
-    if (!agent.voice_enabled) {
-      return res.status(400).json({
-        success: false,
-        message: "Voice is not enabled for this agent",
-      });
-    }
-
     if (!agent.elevenlabs_agent_id) {
       return res.status(400).json({
         success: false,
         message: "ElevenLabs agent not configured",
       });
     }
-
+    if (!agent.event_title) {
+      return res.status(400).json({
+        success: false,
+        message: "Event Title not defined",
+      });
+    }
+    const dynamic_variables = {
+      eventId: String(agent_id),
+      eventName: String(agent.event_title),
+    };
     /* -------------------------------------------------- */
-    /* 2️⃣ Call ElevenLabs via Utility */
+    /* 2️⃣ Submit Batch Call (Single Test Mode) */
     /* -------------------------------------------------- */
-    const elevenResponse = await outboundCall({
+    const elevenResponse = await submitTestBatchCall({
       agentId: agent.elevenlabs_agent_id,
       agentPhoneNumberId: ELEVENLABS_AGENT_PHONE_NUMBER_ID,
       toNumber: to_number,
+      dynamicVariables: dynamic_variables,
     });
-
     if (!elevenResponse.success) {
       return res.status(500).json({
         success: false,
-        message: "Failed to initiate ElevenLabs call",
+        message: "Failed to initiate ElevenLabs test batch call",
       });
     }
-
     /* -------------------------------------------------- */
     /* 3️⃣ Create Test Session */
     /* -------------------------------------------------- */
-
-    const { data: agentData, error: testError } = await supabase
+    const { data: testSession, error: testError } = await supabase
       .from("agent_test_sessions")
       .insert([
         {
@@ -86,21 +76,19 @@ export const testVoiceAgent = async (req, res) => {
           user_id: agent.user_id,
           test_type: "voice",
           test_phone_number: to_number,
-          test_status: "initiated",
-          conversation_id: elevenResponse.conversation_id,
+          test_status: "queued",
+          batch_id: elevenResponse.batch_id,
           started_at: new Date(),
           created_at: new Date(),
         },
       ])
       .select()
       .single();
-
     if (testError) {
       console.error("Test session insert error:", testError);
     }
-
     /* -------------------------------------------------- */
-    /* 4️⃣ Update Agent Counters */
+    /* 4️⃣ Update Agent Counters + Save Batch ID */
     /* -------------------------------------------------- */
     await supabase
       .from("agents")
@@ -108,49 +96,43 @@ export const testVoiceAgent = async (req, res) => {
         total_tests: agent.total_tests + 1,
         total_calls: agent.total_calls + 1,
         last_used_at: new Date(),
+        // last_batch_id: elevenResponse.batch_id, // 🔥 NEW
       })
       .eq("agent_id", agent_id);
-
     /* -------------------------------------------------- */
     /* 5️⃣ Return Response */
     /* -------------------------------------------------- */
     return res.status(200).json({
       success: true,
-      message: "Voice test initiated successfully",
-      conversation_id: elevenResponse.conversation_id,
-      callSid: elevenResponse.callSid,
-      test_session_id: agentData.test_session_id,
+      message: "Voice test batch initiated successfully",
+      batch_id: elevenResponse.batch_id,
+      test_session_id: testSession?.test_session_id,
     });
   } catch (err) {
-    console.error("Voice test error:", err.response?.data || err.message);
-
+    console.error("Voice test batch error:", err);
     return res.status(500).json({
       success: false,
       message: "Something went wrong while testing voice agent",
     });
   }
 };
-
 //Get single test session data
 export const getTestSession = async (req, res) => {
   try {
     const { session_id } = req.params;
     // const { user_id } = req.query;
-
     if (!session_id) {
       return res.status(400).json({
         success: false,
         message: "Session ID is required",
       });
     }
-
     // if (!user_id) {
     //   return res.status(400).json({
     //     success: false,
     //     message: "User ID is required",
     //   });
     // }
-
     /* -------------------------------------------------- */
     /* Fetch Test Session */
     /* -------------------------------------------------- */
@@ -160,14 +142,12 @@ export const getTestSession = async (req, res) => {
       .eq("test_session_id", session_id)
       //   .eq("user_id", user_id) // 🔐 security check
       .single();
-
     if (error || !testSession) {
       return res.status(404).json({
         success: false,
         message: "Test session not found",
       });
     }
-
     /* -------------------------------------------------- */
     /* Return Response */
     /* -------------------------------------------------- */
@@ -177,31 +157,26 @@ export const getTestSession = async (req, res) => {
     });
   } catch (err) {
     console.error("Get test session error:", err.message);
-
     return res.status(500).json({
       success: false,
       message: "Something went wrong while fetching test session",
     });
   }
 };
-
 //get all test session data
 export const getUserTestSessions = async (req, res) => {
   try {
     const { user_id } = req.query;
-
     if (!user_id) {
       return res.status(400).json({
         success: false,
         message: "User ID is required",
       });
     }
-
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
-
     /* -------------------------------------------------- */
     /* Fetch All Test Sessions For User */
     /* -------------------------------------------------- */
@@ -215,7 +190,6 @@ export const getUserTestSessions = async (req, res) => {
       .eq("user_id", user_id)
       .order("created_at", { ascending: false }) // latest first
       .range(from, to);
-
     if (error) {
       console.error("Fetch test sessions error:", error);
       return res.status(500).json({
@@ -223,7 +197,6 @@ export const getUserTestSessions = async (req, res) => {
         message: "Failed to fetch test sessions",
       });
     }
-
     return res.status(200).json({
       success: true,
       count: testSessions.length,
@@ -233,67 +206,94 @@ export const getUserTestSessions = async (req, res) => {
     });
   } catch (err) {
     console.error("Get user test sessions error:", err.message);
-
     return res.status(500).json({
       success: false,
       message: "Something went wrong while fetching test sessions",
     });
   }
 };
-
-// Sync voice test status
+// Sync voice test status (Batch Mode)
 export const syncVoiceTestStatus = async (req, res) => {
   try {
-    const { conversation_id } = req.params;
-
-    if (!conversation_id) {
+    const { batch_id } = req.params;
+    if (!batch_id) {
       return res.status(400).json({
         success: false,
-        message: "Conversation ID is required",
+        message: "Batch ID is required",
       });
     }
-
     /* -------------------------------------------------- */
-    /* 1️⃣ Get Conversation From ElevenLabs */
+    /* 1️⃣ Fetch Batch From ElevenLabs */
     /* -------------------------------------------------- */
     const response = await axios.get(
-      `https://api.elevenlabs.io/v1/convai/conversations/${conversation_id}`,
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${batch_id}`,
       {
         headers: {
           "xi-api-key": process.env.ELEVENLABS_API_KEY,
         },
       },
     );
-
-    const conversation = response.data;
-
+    const batch = response.data;
+    if (!batch || !batch.recipients || batch.recipients.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No recipients found in batch",
+      });
+    }
+    // Since test = single recipient
+    const recipient = batch.recipients[0];
     /* -------------------------------------------------- */
     /* 2️⃣ Map Status */
     /* -------------------------------------------------- */
     let mappedStatus = "processing";
-
-    if (conversation.status === "completed") {
+    if (recipient.status === "completed") {
       mappedStatus = "completed";
-    } else if (conversation.status === "failed") {
+    } else if (recipient.status === "failed" || recipient.status === "error") {
       mappedStatus = "failed";
+    } else if (
+      recipient.status === "pending" ||
+      recipient.status === "scheduled"
+    ) {
+      mappedStatus = "queued";
     }
-
     /* -------------------------------------------------- */
-    /* 3️⃣ Update Test Session */
+    /* 3️⃣ If Conversation Exists → Fetch Transcript */
+    /* -------------------------------------------------- */
+    let transcript = null;
+    let duration = null;
+    if (recipient.conversation_id) {
+      try {
+        const convoRes = await axios.get(
+          `https://api.elevenlabs.io/v1/convai/conversations/${recipient.conversation_id}`,
+          {
+            headers: {
+              "xi-api-key": process.env.ELEVENLABS_API_KEY,
+            },
+          },
+        );
+        const conversation = convoRes.data;
+        transcript = conversation.transcript || null;
+        duration = conversation.metadata?.call_duration_secs || null;
+      } catch (err) {
+        console.warn("⚠️ Failed to fetch conversation details");
+      }
+    }
+    /* -------------------------------------------------- */
+    /* 4️⃣ Update Test Session */
     /* -------------------------------------------------- */
     const { data, error } = await supabase
       .from("agent_test_sessions")
       .update({
         test_status: mappedStatus,
-        completed_at: new Date(),
-        duration_seconds: conversation.metadata?.call_duration_secs || null,
-        test_data_collected: conversation.transcript || null,
+        conversation_id: recipient.conversation_id || null,
+        duration_seconds: duration,
+        test_transcript: transcript,
+        completed_at: mappedStatus === "completed" ? new Date() : null,
         updated_at: new Date(),
       })
-      .eq("conversation_id", conversation_id)
+      .eq("batch_id", batch_id)
       .select()
       .single();
-
     if (error) {
       console.error("Update test session error:", error);
       return res.status(500).json({
@@ -301,25 +301,32 @@ export const syncVoiceTestStatus = async (req, res) => {
         message: "Failed to update test session",
       });
     }
-
     return res.status(200).json({
       success: true,
-      message: "Test session synced successfully",
+      message: "Test session synced successfully (Batch Mode)",
       data,
+      debug: {
+        batch_status: batch.status,
+        recipient_status: recipient.status,
+      },
     });
   } catch (err) {
-    console.error("Sync voice test error:", err.response?.data || err.message);
-
+    console.error(
+      "Sync voice test batch error:",
+      err.response?.data || err.message,
+    );
     return res.status(500).json({
       success: false,
-      message: "Failed to sync voice test",
+      message: "Failed to sync voice test batch",
     });
   }
 };
-
 /**
  * POST /api/agent-system/:agent_id/test-chat
- * Test chatbot with FULL RSVP flow using mode flag
+ * Test chatbot in browser using existing AI Decision Engine
+ *
+ * This endpoint uses your EXISTING aiDecisionEngine.js without ANY modifications!
+ * It just wraps it with test-specific context that won't affect production.
  */
 export const testChatAgent = async (req, res) => {
   try {

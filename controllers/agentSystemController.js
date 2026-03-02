@@ -79,13 +79,14 @@ export const createAgent = async (req, res) => {
       agent_name,
       agent_description,
       knowledge_base_id,
+      event_title,
     } = req.body;
 
     // Validate required fields
-    if (!user_id || !template_id || !agent_name) {
+    if (!user_id || !template_id || !agent_name || !event_title) {
       return res.status(400).json({
         success: false,
-        error: "user_id, template_id, and agent_name are required",
+        error: "user_id, template_id, event_title and agent_name are required",
       });
     }
 
@@ -156,6 +157,7 @@ export const createAgent = async (req, res) => {
         knowledge_base_id,
         elevenlabs_agent_id: duplicatedAgent.agent_id,
         status: "unassigned",
+        event_title: event_title,
       })
       .select(
         `

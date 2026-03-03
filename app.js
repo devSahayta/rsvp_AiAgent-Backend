@@ -32,6 +32,7 @@ app.use(
     origin: [
       "http://localhost:5173",
       "https://rsvp-ai-agent-frontend.vercel.app",
+      "https://www.sutrak.ai",
       "https://sutrak.ai",
     ],
     credentials: true,

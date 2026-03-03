@@ -50,6 +50,8 @@ app.use(
   })
 );
 
+app.options("*", cors());
+
 // Always extract token (if present) so authenticateUser can rely on req.user
 app.use(extractKindeUser);
 

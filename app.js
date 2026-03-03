@@ -30,7 +30,6 @@ app.use(express.json());
 const allowedOrigins = [
   "http://localhost:5173",
   "https://rsvp-ai-agent-frontend.vercel.app",
-  "https://www.sutrak.ai",
   "https://sutrak.ai",
 ];
 

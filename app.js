@@ -27,29 +27,16 @@ const app = express();
 app.use(express.json());
 
 // CORS: allow your frontend origin(s)
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://rsvp-ai-agent-frontend.vercel.app",
-  "https://sutrak.ai",
-];
-
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // allow requests with no origin (server-to-server, postman)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      } else {
-        return callback(new Error("Not allowed by CORS"));
-      }
-    },
+    origin: [
+      "http://localhost:5173",
+      "https://rsvp-ai-agent-frontend.vercel.app",
+      "https://sutrak.ai",
+    ],
     credentials: true,
   })
 );
-
-app.options("*", cors());
 
 // Always extract token (if present) so authenticateUser can rely on req.user
 app.use(extractKindeUser);

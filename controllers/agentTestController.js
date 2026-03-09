@@ -1,19 +1,65 @@
-// controllers/agentTestController.js
+// controllers/agentTestController.js - WITH CREDIT INTEGRATION
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
 import { submitTestBatchCall } from "../utils/elevenlabsApi.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
+import { 
+  CREDIT_PRICING,
+  calculateChatCredits,
+  calculateVoiceCredits,
+} from "../config/creditPricing.js";
+import { getUserById, updateUserCredits } from "../models/userModel.js";
+
 const ELEVENLABS_AGENT_PHONE_NUMBER_ID = process.env.ELEVENLABS_PHONE_NUMBER_ID;
+
+/**
+ * POST /api/agent-system/:agent_id/test-voice
+ * Initiate test voice call
+ */
 export const testVoiceAgent = async (req, res) => {
   try {
     const { agent_id } = req.params;
-    const { to_number } = req.body;
+    const { to_number, user_id } = req.body; // ✅ Need user_id for credits
+
     if (!to_number) {
       return res.status(400).json({
         success: false,
         message: "Phone number is required",
       });
     }
+
+    if (!user_id) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required for credit tracking",
+      });
+    }
+
+    // ✅ CHECK CREDITS FIRST (estimate 1 minute minimum)
+    console.log("💰 Checking credits for test voice call...");
+    const user = await getUserById(user_id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const estimatedCredits = CREDIT_PRICING.TEST_VOICE_PER_MINUTE; // At least 1 minute
+    
+    if (user.credits < estimatedCredits) {
+      return res.status(402).json({
+        success: false,
+        message: "Insufficient credits for test voice call",
+        current_balance: user.credits,
+        required_credits: estimatedCredits,
+        shortfall: estimatedCredits - user.credits,
+      });
+    }
+
+    console.log(`✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`);
+
     /* -------------------------------------------------- */
     /* 1️⃣ Fetch Agent */
     /* -------------------------------------------------- */
@@ -22,34 +68,40 @@ export const testVoiceAgent = async (req, res) => {
       .select("*")
       .eq("agent_id", agent_id)
       .single();
+
     if (error || !agent) {
       return res.status(404).json({
         success: false,
         message: "Agent not found",
       });
     }
+
     if (!agent.is_active || !agent.voice_enabled) {
       return res.status(400).json({
         success: false,
         message: "Voice not enabled or agent inactive",
       });
     }
+
     if (!agent.elevenlabs_agent_id) {
       return res.status(400).json({
         success: false,
         message: "ElevenLabs agent not configured",
       });
     }
+
     if (!agent.event_title) {
       return res.status(400).json({
         success: false,
         message: "Event Title not defined",
       });
     }
+
     const dynamic_variables = {
       eventId: String(agent_id),
       eventName: String(agent.event_title),
     };
+
     /* -------------------------------------------------- */
     /* 2️⃣ Submit Batch Call (Single Test Mode) */
     /* -------------------------------------------------- */
@@ -59,21 +111,23 @@ export const testVoiceAgent = async (req, res) => {
       toNumber: to_number,
       dynamicVariables: dynamic_variables,
     });
+
     if (!elevenResponse.success) {
       return res.status(500).json({
         success: false,
         message: "Failed to initiate ElevenLabs test batch call",
       });
     }
+
     /* -------------------------------------------------- */
-    /* 3️⃣ Create Test Session */
+    /* 3️⃣ Create Test Session (with user_id) */
     /* -------------------------------------------------- */
     const { data: testSession, error: testError } = await supabase
       .from("agent_test_sessions")
       .insert([
         {
           agent_id,
-          user_id: agent.user_id,
+          user_id, // ✅ Store user_id for credit deduction later
           test_type: "voice",
           test_phone_number: to_number,
           test_status: "queued",
@@ -84,11 +138,13 @@ export const testVoiceAgent = async (req, res) => {
       ])
       .select()
       .single();
+
     if (testError) {
       console.error("Test session insert error:", testError);
     }
+
     /* -------------------------------------------------- */
-    /* 4️⃣ Update Agent Counters + Save Batch ID */
+    /* 4️⃣ Update Agent Counters */
     /* -------------------------------------------------- */
     await supabase
       .from("agents")
@@ -96,9 +152,9 @@ export const testVoiceAgent = async (req, res) => {
         total_tests: agent.total_tests + 1,
         total_calls: agent.total_calls + 1,
         last_used_at: new Date(),
-        // last_batch_id: elevenResponse.batch_id, // 🔥 NEW
       })
       .eq("agent_id", agent_id);
+
     /* -------------------------------------------------- */
     /* 5️⃣ Return Response */
     /* -------------------------------------------------- */
@@ -107,6 +163,7 @@ export const testVoiceAgent = async (req, res) => {
       message: "Voice test batch initiated successfully",
       batch_id: elevenResponse.batch_id,
       test_session_id: testSession?.test_session_id,
+      note: "Credits will be deducted after call completes based on actual duration",
     });
   } catch (err) {
     console.error("Voice test batch error:", err);
@@ -116,23 +173,22 @@ export const testVoiceAgent = async (req, res) => {
     });
   }
 };
-//Get single test session data
+
+/**
+ * GET /api/agent-system/test-sessions/:session_id
+ * Get single test session data
+ */
 export const getTestSession = async (req, res) => {
   try {
     const { session_id } = req.params;
-    // const { user_id } = req.query;
+
     if (!session_id) {
       return res.status(400).json({
         success: false,
         message: "Session ID is required",
       });
     }
-    // if (!user_id) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: "User ID is required",
-    //   });
-    // }
+
     /* -------------------------------------------------- */
     /* Fetch Test Session */
     /* -------------------------------------------------- */
@@ -140,14 +196,15 @@ export const getTestSession = async (req, res) => {
       .from("agent_test_sessions")
       .select("*")
       .eq("test_session_id", session_id)
-      //   .eq("user_id", user_id) // 🔐 security check
       .single();
+
     if (error || !testSession) {
       return res.status(404).json({
         success: false,
         message: "Test session not found",
       });
     }
+
     /* -------------------------------------------------- */
     /* Return Response */
     /* -------------------------------------------------- */
@@ -163,20 +220,27 @@ export const getTestSession = async (req, res) => {
     });
   }
 };
-//get all test session data
+
+/**
+ * GET /api/agent-system/test-sessions
+ * Get all test session data for user
+ */
 export const getUserTestSessions = async (req, res) => {
   try {
     const { user_id } = req.query;
+
     if (!user_id) {
       return res.status(400).json({
         success: false,
         message: "User ID is required",
       });
     }
+
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const from = (page - 1) * limit;
     const to = from + limit - 1;
+
     /* -------------------------------------------------- */
     /* Fetch All Test Sessions For User */
     /* -------------------------------------------------- */
@@ -188,8 +252,9 @@ export const getUserTestSessions = async (req, res) => {
       .from("agent_test_sessions")
       .select("*", { count: "exact" })
       .eq("user_id", user_id)
-      .order("created_at", { ascending: false }) // latest first
+      .order("created_at", { ascending: false })
       .range(from, to);
+
     if (error) {
       console.error("Fetch test sessions error:", error);
       return res.status(500).json({
@@ -197,6 +262,7 @@ export const getUserTestSessions = async (req, res) => {
         message: "Failed to fetch test sessions",
       });
     }
+
     return res.status(200).json({
       success: true,
       count: testSessions.length,
@@ -212,16 +278,22 @@ export const getUserTestSessions = async (req, res) => {
     });
   }
 };
-// Sync voice test status (Batch Mode)
+
+/**
+ * POST /api/agent-system/test-sessions/:batch_id/sync
+ * Sync voice test status (Batch Mode) AND deduct credits
+ */
 export const syncVoiceTestStatus = async (req, res) => {
   try {
     const { batch_id } = req.params;
+
     if (!batch_id) {
       return res.status(400).json({
         success: false,
         message: "Batch ID is required",
       });
     }
+
     /* -------------------------------------------------- */
     /* 1️⃣ Fetch Batch From ElevenLabs */
     /* -------------------------------------------------- */
@@ -233,15 +305,18 @@ export const syncVoiceTestStatus = async (req, res) => {
         },
       },
     );
+
     const batch = response.data;
+
     if (!batch || !batch.recipients || batch.recipients.length === 0) {
       return res.status(404).json({
         success: false,
         message: "No recipients found in batch",
       });
     }
-    // Since test = single recipient
+
     const recipient = batch.recipients[0];
+
     /* -------------------------------------------------- */
     /* 2️⃣ Map Status */
     /* -------------------------------------------------- */
@@ -256,11 +331,13 @@ export const syncVoiceTestStatus = async (req, res) => {
     ) {
       mappedStatus = "queued";
     }
+
     /* -------------------------------------------------- */
-    /* 3️⃣ If Conversation Exists → Fetch Transcript */
+    /* 3️⃣ If Conversation Exists → Fetch Transcript + Duration */
     /* -------------------------------------------------- */
     let transcript = null;
     let duration = null;
+
     if (recipient.conversation_id) {
       try {
         const convoRes = await axios.get(
@@ -274,10 +351,13 @@ export const syncVoiceTestStatus = async (req, res) => {
         const conversation = convoRes.data;
         transcript = conversation.transcript || null;
         duration = conversation.metadata?.call_duration_secs || null;
+
+        console.log(`⏱️  Call duration: ${duration} seconds`);
       } catch (err) {
         console.warn("⚠️ Failed to fetch conversation details");
       }
     }
+
     /* -------------------------------------------------- */
     /* 4️⃣ Update Test Session */
     /* -------------------------------------------------- */
@@ -294,6 +374,7 @@ export const syncVoiceTestStatus = async (req, res) => {
       .eq("batch_id", batch_id)
       .select()
       .single();
+
     if (error) {
       console.error("Update test session error:", error);
       return res.status(500).json({
@@ -301,13 +382,63 @@ export const syncVoiceTestStatus = async (req, res) => {
         message: "Failed to update test session",
       });
     }
+
+    /* -------------------------------------------------- */
+    /* 5️⃣ DEDUCT CREDITS IF CALL COMPLETED */
+    /* -------------------------------------------------- */
+    let creditsDeducted = null;
+
+    if (mappedStatus === "completed" && duration && duration > 0 && data.user_id) {
+      try {
+        console.log("💰 Deducting credits for test voice call...");
+
+        // Calculate credits (2 credits per minute for test)
+        const creditsToDeduct = calculateVoiceCredits(duration, true); // true = test mode
+
+        console.log(`💰 Credits to deduct: ${creditsToDeduct} (${duration}s × 2/min)`);
+
+        // Get user
+        const user = await getUserById(data.user_id);
+
+        if (user && user.credits >= creditsToDeduct) {
+          // Deduct credits
+          const newCredits = Number((user.credits - creditsToDeduct).toFixed(2));
+          await updateUserCredits(data.user_id, newCredits);
+
+          creditsDeducted = creditsToDeduct;
+
+          console.log(`✅ Credits deducted: ${user.credits} → ${newCredits} (-${creditsToDeduct})`);
+
+          // Update test session with credit info
+          await supabase
+            .from("agent_test_sessions")
+            .update({
+              test_data_collected: {
+                ...data.test_data_collected,
+                credits_deducted: creditsToDeduct,
+                previous_balance: user.credits,
+                new_balance: newCredits,
+              },
+            })
+            .eq("test_session_id", data.test_session_id);
+        } else {
+          console.warn(`⚠️ Insufficient credits for user ${data.user_id}`);
+        }
+      } catch (creditError) {
+        console.error("❌ Error deducting credits:", creditError);
+        // Don't fail the whole sync if credit deduction fails
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: "Test session synced successfully (Batch Mode)",
       data,
+      credits_deducted: creditsDeducted,
       debug: {
         batch_status: batch.status,
         recipient_status: recipient.status,
+        duration_seconds: duration,
       },
     });
   } catch (err) {
@@ -321,12 +452,10 @@ export const syncVoiceTestStatus = async (req, res) => {
     });
   }
 };
+
 /**
  * POST /api/agent-system/:agent_id/test-chat
  * Test chatbot in browser using existing AI Decision Engine
- *
- * This endpoint uses your EXISTING aiDecisionEngine.js without ANY modifications!
- * It just wraps it with test-specific context that won't affect production.
  */
 export const testChatAgent = async (req, res) => {
   try {
@@ -339,6 +468,38 @@ export const testChatAgent = async (req, res) => {
         error: "Message is required",
       });
     }
+
+    if (!user_id) {
+      return res.status(400).json({
+        success: false,
+        error: "User ID is required for credit tracking",
+      });
+    }
+
+    // ✅ CHECK CREDITS FIRST
+    console.log("💰 Checking credits for test chat...");
+    const user = await getUserById(user_id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    const requiredCredits = CREDIT_PRICING.TEST_CHAT_PER_MESSAGE;
+    
+    if (user.credits < requiredCredits) {
+      return res.status(402).json({
+        success: false,
+        error: "Insufficient credits for test chat",
+        current_balance: user.credits,
+        required_credits: requiredCredits,
+        shortfall: requiredCredits - user.credits,
+      });
+    }
+
+    console.log(`✅ Credit check passed: ${user.credits} >= ${requiredCredits}`);
 
     console.log("📞 TEST CHAT - Agent:", agent_id, "Message:", message);
 
@@ -404,7 +565,7 @@ export const testChatAgent = async (req, res) => {
     // Call with mode: "test"
     let aiResponse = await decideNextStep(context, { mode: "test" });
 
-    // ✅ SKIP DOCUMENT STATES IN TEST MODE
+    // Skip document states in test mode
     const documentStates = [
       "awaiting_doc_person_name",
       "awaiting_doc_role",
@@ -448,8 +609,25 @@ export const testChatAgent = async (req, res) => {
         : context.cache,
     };
 
-    // Final response (no disclaimer needed - it's in frontend UI)
     let finalResponse = aiResponse.reply;
+
+    // ✅ DEDUCT CREDITS AFTER SUCCESSFUL RESPONSE
+    let creditsDeducted = null;
+    try {
+      console.log("💰 Deducting credits for test chat...");
+      
+      const creditsToDeduct = calculateChatCredits(1, true); // true = test mode
+      const newCredits = Number((user.credits - creditsToDeduct).toFixed(2));
+      
+      await updateUserCredits(user_id, newCredits);
+      
+      creditsDeducted = creditsToDeduct;
+      
+      console.log(`✅ Credits deducted: ${user.credits} → ${newCredits} (-${creditsToDeduct})`);
+    } catch (creditError) {
+      console.error("❌ Error deducting credits:", creditError);
+      // Don't fail the response if credit deduction fails
+    }
 
     // Log test session
     try {
@@ -485,6 +663,7 @@ export const testChatAgent = async (req, res) => {
             current_state: aiResponse.nextState,
             rsvp_status: updatedContext.convo.rsvp_status,
             guest_count: updatedContext.convo.number_of_guests,
+            credits_deducted: creditsDeducted,
           },
           started_at: new Date().toISOString(),
           completed_at: new Date().toISOString(),
@@ -519,6 +698,7 @@ export const testChatAgent = async (req, res) => {
               current_state: aiResponse.nextState,
               rsvp_status: updatedContext.convo.rsvp_status,
               guest_count: updatedContext.convo.number_of_guests,
+              total_credits_deducted: (existingSession.test_data_collected?.total_credits_deducted || 0) + creditsDeducted,
             },
             updated_at: new Date().toISOString(),
             completed_at: new Date().toISOString(),
@@ -536,6 +716,7 @@ export const testChatAgent = async (req, res) => {
       success: true,
       response: finalResponse,
       conversation_state: updatedContext,
+      credits_deducted: creditsDeducted,
       metadata: {
         agent_name: agent.agent_name,
         used_kb: !!agent.knowledge_base_id,

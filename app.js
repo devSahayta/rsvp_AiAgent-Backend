@@ -20,8 +20,12 @@ import agentRoutes from "./routes/agentRoutes.js";
 import transportRoutes from './routes/transportRoutes.js';
 import flightTrackingRoutes from "./routes/flightRoutes.js";
 import agentSystemRoutes from "./routes/agentSystemRoutes.js";
+import { startVoiceTestSyncCron } from "./crons/voiceTestSyncCron.js";
+import { startProductionBatchSyncCron } from "./crons/productionBatchSyncCron.js";
 
 dotenv.config();
+startVoiceTestSyncCron();
+startProductionBatchSyncCron();
 
 const app = express();
 app.use(express.json());

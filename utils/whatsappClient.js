@@ -8,11 +8,11 @@ const WHATSAPP_PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 // ✅ NEW FUNCTION — For Initial Template Messages
 export const sendInitialTemplateMessage = async (to, templateName, components) => {
   try {
-    const res = await axios.post(
-      `https://graph.facebook.com/v21.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+    const response = await axios.post(
+      `https://graph.facebook.com/v22.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
-        to,
+        to: to,
         type: "template",
         template: {
           name: templateName,
@@ -28,11 +28,15 @@ export const sendInitialTemplateMessage = async (to, templateName, components) =
       }
     );
 
-    console.log(`✅ Message sent to ${to}`, res.data);
-    return res.data;
+    console.log(`✅ Message sent to ${to}`, response.data);
+
+    return response.data;
 
   } catch (err) {
-    console.error(`❌ WhatsApp send error for ${to}:`, err.response?.data || err.message);
+    console.error(
+      `❌ WhatsApp send error for ${to}:`,
+      err.response?.data || err.message
+    );
     throw err;
   }
 };

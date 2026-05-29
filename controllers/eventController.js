@@ -17,6 +17,14 @@ import {
   deleteAgent,
 } from "../utils/elevenlabsApi.js";
 
+// ✅ NEW: Credit system imports
+import { 
+  CREDIT_PRICING,
+  calculateVoiceCredits,
+  formatCredits,
+} from "../config/creditPricing.js";
+import { getUserById, updateUserCredits } from "../models/userModel.js";
+
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import fetch from "node-fetch";
 
@@ -544,15 +552,14 @@ export const triggerBatchCall = async (req, res) => {
       .eq("event_id", eventId)
       .single();
 
-    // console.log({eventData})
-    // return res.status(404).json({ eventData })
-
     if (eventError || !eventData) {
       console.error("Event not found:", eventError);
       return res.status(404).json({ error: "Event not found" });
     }
 
     console.log("✅ Event found:", eventData.event_name);
+
+    const user_id = eventData.user_id; // ✅ Get user_id from event
 
     // 2️⃣ Fetch participants linked to this event
     const { data: participants, error: participantError } = await supabase
@@ -571,11 +578,50 @@ export const triggerBatchCall = async (req, res) => {
 
     console.log(`✅ Found ${participants.length} participants`);
 
+    // ✅ ============================================
+    // ✅ CHECK CREDITS BEFORE STARTING BATCH
+    // ✅ ============================================
+    console.log("💰 Checking production batch call credits for user:", user_id);
+    
+    const user = await getUserById(user_id);
+    
+    if (!user) {
+      console.error("❌ User not found:", user_id);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Estimate credits needed (assume 3 minutes average per call)
+    const ESTIMATED_MINUTES_PER_CALL = 3;
+    const totalEstimatedMinutes = participants.length * ESTIMATED_MINUTES_PER_CALL;
+    const estimatedCredits = totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+    console.log(`📊 Batch credit estimation:`);
+    console.log(`   - Participants: ${participants.length}`);
+    console.log(`   - Estimated minutes: ${totalEstimatedMinutes} (${ESTIMATED_MINUTES_PER_CALL} min/call)`);
+    console.log(`   - Estimated credits: ${estimatedCredits}`);
+    console.log(`   - User balance: ${user.credits}`);
+    
+    if (user.credits < estimatedCredits) {
+      console.log(`❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`);
+      
+      return res.status(402).json({
+        error: "Insufficient credits to start batch call",
+        current_balance: formatCredits(user.credits),
+        estimated_credits: formatCredits(estimatedCredits),
+        shortfall: formatCredits(estimatedCredits - user.credits),
+        participants_count: participants.length,
+        estimated_minutes: totalEstimatedMinutes,
+        note: "Credits will be deducted based on actual call duration after calls complete"
+      });
+    }
+    
+    console.log(`✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`);
+    // ✅ ============================================
+
     // 3️⃣ Prepare recipients with proper phone number format
     const isSmartFields = eventData.field_mode === "smart_fields";
 
     const recipients = participants.map((p) => {
-      // Format phone number to E.164 format (with + prefix)
       let formattedPhone = String(p.phone_number || "").trim();
 
       if (formattedPhone && !formattedPhone.startsWith("+")) {
@@ -628,15 +674,27 @@ export const triggerBatchCall = async (req, res) => {
       new Date(scheduledUnix * 1000).toISOString(),
     );
 
-    const agentConfig = await getAgent(eventData.elevenlabs_agent_id);
+    // Get real elevenlabs agent
+    const { data: agentData, error: agentError } = await supabase
+      .from("agents")
+      .select("elevenlabs_agent_id")
+      .eq("agent_id", eventData.agent_id)
+      .single();
 
-    if (!agentConfig) {
-      return res.status(404).json({ error: "agent not found" });
+    if (agentError || !agentData?.elevenlabs_agent_id) {
+      console.error("❌ ElevenLabs agent missing");
+      return res.status(400).json({
+        error: "ElevenLabs agent not configured properly",
+      });
     }
+
+    const elevenAgentId = agentData.elevenlabs_agent_id;
+
+    console.log("🤖 Using ElevenLabs Agent:", elevenAgentId);
 
     const payload = {
       call_name: `event-${eventId}-${Date.now()}`,
-      agent_id: eventData.elevenlabs_agent_id,
+      agent_id: elevenAgentId,
       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
       whatsapp_params: null,
       recipients: recipients,
@@ -675,12 +733,18 @@ export const triggerBatchCall = async (req, res) => {
 
     console.log("✅ Batch call created successfully, batch_id:", data.id);
 
-    // 5️⃣ Update event with batch_id + status
+    // 5️⃣ Update event with batch_id + status + user_id (for credit tracking)
+    // ✅ RESET credit tracking for NEW batch
     const { error: updateError } = await supabase
       .from("events")
       .update({
         batch_id: data.id,
         batch_status: data.status || "queued",
+        batch_created_at: new Date().toISOString(),
+        user_id: user_id,
+        credits_deducted: null, // ✅ RESET - allow new batch to be tracked
+        total_call_duration: null, // ✅ RESET
+        successful_calls: null, // ✅ RESET
       })
       .eq("event_id", eventId);
 
@@ -690,7 +754,7 @@ export const triggerBatchCall = async (req, res) => {
       console.log("✅ Event updated with batch_id");
     }
 
-    // 6️⃣ 🔥 Create placeholder conversation_results for each participant if missing
+    // 6️⃣ Create placeholder conversation_results for each participant if missing
     console.log("🔄 Creating placeholder conversation results...");
     for (const participant of participants) {
       const { data: existing, error: existingError } = await supabase
@@ -745,6 +809,11 @@ export const triggerBatchCall = async (req, res) => {
       batch: data,
       batch_id: data.id,
       recipients_count: participants.length,
+      credit_info: {
+        estimated_credits: formatCredits(estimatedCredits),
+        current_balance: formatCredits(user.credits),
+        note: "Actual credits will be deducted after calls complete based on real duration"
+      },
       debug: {
         event_id: eventId,
         event_name: eventData.event_name,
@@ -762,14 +831,17 @@ export const triggerBatchCall = async (req, res) => {
   }
 };
 
+/* ============================================
+   🔥 RETRY BATCH CALL - WITH CREDITS
+   ============================================ */
 export const retryBatchCall = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // 1️⃣ Fetch event batch_id
+    // 1️⃣ Fetch event data
     const { data: eventData, error: eventError } = await supabase
       .from("events")
-      .select("event_name, batch_id")
+      .select("*")
       .eq("event_id", eventId)
       .single();
 
@@ -780,6 +852,74 @@ export const retryBatchCall = async (req, res) => {
     if (!eventData.batch_id) {
       return res.status(400).json({ error: "No batch found for this event" });
     }
+
+    const user_id = eventData.user_id;
+
+    // ✅ ============================================
+    // ✅ CHECK CREDITS BEFORE RETRY
+    // ✅ ============================================
+    console.log("💰 Checking credits for batch retry, user:", user_id);
+    
+    // Fetch batch details to count failed/pending calls
+    const batchResponse = await fetch(
+      `https://api.elevenlabs.io/v1/convai/batch-calling/${eventData.batch_id}`,
+      {
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    const batchData = await batchResponse.json();
+    
+    // Count failed/pending calls that will be retried
+    const failedCount = (batchData.recipients || []).filter(r => 
+      r.status === 'failed' || r.status === 'error' || r.status === 'pending'
+    ).length;
+
+    console.log(`📊 Retry estimation: ${failedCount} calls to retry`);
+
+    if (failedCount === 0) {
+      return res.status(400).json({ 
+        error: "No failed calls to retry",
+        batch_status: batchData.status 
+      });
+    }
+
+    const user = await getUserById(user_id);
+    
+    if (!user) {
+      console.error("❌ User not found:", user_id);
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Estimate credits needed (assume 3 minutes average per retry call)
+    const ESTIMATED_MINUTES_PER_CALL = 3;
+    const totalEstimatedMinutes = failedCount * ESTIMATED_MINUTES_PER_CALL;
+    const estimatedCredits = totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+    console.log(`📊 Retry credit estimation:`);
+    console.log(`   - Failed calls: ${failedCount}`);
+    console.log(`   - Estimated minutes: ${totalEstimatedMinutes}`);
+    console.log(`   - Estimated credits: ${estimatedCredits}`);
+    console.log(`   - User balance: ${user.credits}`);
+    
+    if (user.credits < estimatedCredits) {
+      console.log(`❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`);
+      
+      return res.status(402).json({
+        error: "Insufficient credits to retry batch call",
+        current_balance: formatCredits(user.credits),
+        estimated_credits: formatCredits(estimatedCredits),
+        shortfall: formatCredits(estimatedCredits - user.credits),
+        failed_calls_count: failedCount,
+        note: "Credits will be deducted based on actual call duration after retry completes"
+      });
+    }
+    
+    console.log(`✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`);
+    // ✅ ============================================
 
     // 2️⃣ Call ElevenLabs Retry API
     const response = await fetch(
@@ -804,18 +944,28 @@ export const retryBatchCall = async (req, res) => {
     }
 
     // 3️⃣ Update event with new batch_id and status
+    // ✅ RESET credit tracking for retry
     await supabase
       .from("events")
       .update({
         batch_id: data.id || eventData.batch_id,
         batch_status: data.status || "retrying",
         batch_created_at: new Date().toISOString(),
+        credits_deducted: null, // ✅ RESET - allow retry to be tracked
+        total_call_duration: null, // ✅ RESET
+        successful_calls: null, // ✅ RESET
       })
       .eq("event_id", eventId);
 
     return res.status(200).json({
       message: "✅ Retry batch call started successfully",
       batch: data,
+      failed_calls_count: failedCount,
+      credit_info: {
+        estimated_credits: formatCredits(estimatedCredits),
+        current_balance: formatCredits(user.credits),
+        note: "Actual credits will be deducted after retry completes"
+      },
     });
   } catch (err) {
     console.error("retryBatchCall error:", err);

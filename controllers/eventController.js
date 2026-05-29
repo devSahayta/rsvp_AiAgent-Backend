@@ -110,38 +110,79 @@ export const createEventWithCsv = async (req, res) => {
     }
 
     //Fetch agent_template
-    const { data: template, error: templateError } = await supabase
-      .from("agent_templates")
-      .select("*")
-      .eq("template_id", ag.template_id)
-      .single();
+    let eventType = null;
 
-    if (templateError || !template) {
-      return res.status(400).json({ error: "No Agent Template Found" });
+    if (ag.field_mode === "classic") {
+      const { data: template, error: templateError } = await supabase
+        .from("agent_templates")
+        .select("*")
+        .eq("template_id", ag.template_id)
+        .single();
+
+      if (templateError || !template) {
+        return res.status(400).json({ error: "No Agent Template Found" });
+      }
+
+      // Use template category as event type if available
+      if (template.category) {
+        eventType = template.category;
+      }
     }
 
-    // Fetch KB from DB
-    const { data: kb, error: kbError } = await supabase
-      .from("knowledge_bases")
-      .select("*")
-      .eq("id", ag.knowledge_base_id)
-      .single();
+    // Fetch KB from DB (optional for smart_fields agents)
+    let kb = null;
+    if (ag.knowledge_base_id) {
+      const { data: kbData, error: kbError } = await supabase
+        .from("knowledge_bases")
+        .select("*")
+        .eq("id", ag.knowledge_base_id)
+        .single();
 
-    if (kbError || !kb) {
-      return res.status(400).json({ error: "Invalid knowledge base" });
+      if (kbError || !kbData) {
+        return res.status(400).json({ error: "Invalid knowledge base" });
+      }
+      kb = kbData;
     }
 
     //F) Update event row
     await supabase
       .from("events")
       .update({
-        elevenlabs_agent_id: ag.agent_id,
-        knowledge_base_id: ag.knowledge_base_id,
+        elevenlabs_agent_id: ag.elevenlabs_agent_id,
+        knowledge_base_id: ag.knowledge_base_id || null,
         agent_id: ag.agent_id,
-        event_type: template.category,
-        elevenlabs_kb_id: kb.elevenlabs_kb_id,
+        event_type: eventType,
+        elevenlabs_kb_id: kb?.elevenlabs_kb_id || null,
+        field_mode: ag.field_mode || "classic",
       })
       .eq("event_id", event.event_id);
+
+    // G) If smart_fields agent, copy field definitions into event_smart_fields
+    if (
+      ag.field_mode === "smart_fields" &&
+      Array.isArray(ag.smart_fields) &&
+      ag.smart_fields.length > 0
+    ) {
+      const smartFieldRows = ag.smart_fields.map((f) => ({
+        event_id: event.event_id,
+        field_key: f.field_key,
+        field_label: f.field_label,
+        field_type: f.field_type,
+        ai_question: f.ai_question,
+        options: f.options || [],
+        condition: f.condition || null,
+        is_required: f.is_required !== undefined ? f.is_required : true,
+        display_order: f.display_order || 0,
+      }));
+
+      const { error: sfError } = await supabase
+        .from("event_smart_fields")
+        .insert(smartFieldRows);
+
+      if (sfError) {
+        console.error("Warning: failed to insert smart fields:", sfError);
+      }
+    }
 
     //update agents status
     await supabase
@@ -355,16 +396,68 @@ export const getEventRSVPData = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // ✅ Get Participants
+    // Fetch event to determine field_mode
+    const { data: eventData, error: eventErr } = await supabase
+      .from("events")
+      .select("field_mode")
+      .eq("event_id", eventId)
+      .single();
+
+    if (eventErr) return res.status(400).json({ error: eventErr.message });
+
+    // Get Participants
     const { data: participants, error: pError } = await supabase
       .from("participants")
       .select("*")
       .eq("event_id", eventId);
 
     if (pError) return res.status(400).json({ error: pError });
-
     if (!participants.length) return res.json([]);
 
+    // --- SMART FIELDS mode ---
+    if (eventData?.field_mode === "smart_fields") {
+      const [{ data: smartFields }, { data: responses }] = await Promise.all([
+        supabase
+          .from("event_smart_fields")
+          .select("*")
+          .eq("event_id", eventId)
+          .order("display_order", { ascending: true }),
+        supabase
+          .from("event_rsvp_responses")
+          .select("*")
+          .eq("event_id", eventId),
+      ]);
+
+      // Group responses by participant_id
+      const byParticipant = {};
+      (responses || []).forEach((r) => {
+        if (!byParticipant[r.participant_id])
+          byParticipant[r.participant_id] = {};
+        byParticipant[r.participant_id][r.field_key] = r.response_value;
+      });
+
+      const data = participants.map((p) => {
+        const participantResponses = byParticipant[p.participant_id] || {};
+        const row = {
+          id: p.participant_id,
+          fullName: p.full_name,
+          phoneNumber: p.phone_number,
+          timestamp: p.uploaded_at,
+        };
+        (smartFields || []).forEach((f) => {
+          row[f.field_key] = participantResponses[f.field_key] ?? null;
+        });
+        return row;
+      });
+
+      return res.json({
+        field_mode: "smart_fields",
+        fields: smartFields || [],
+        data,
+      });
+    }
+
+    // --- CLASSIC mode (existing behavior) ---
     const finalData = await Promise.all(
       participants.map(async (p) => {
         const { data: conv } = await supabase
@@ -391,7 +484,7 @@ export const getEventRSVPData = async (req, res) => {
           callStatus: conv?.[0]?.call_status || "Pending",
           proofUploaded: !!upload?.[0],
           documentUpload: upload?.[0] || null,
-          eventName: p.event_id, // Optional: You can JOIN event name also
+          eventName: p.event_id,
         };
       }),
     );
@@ -479,16 +572,31 @@ export const triggerBatchCall = async (req, res) => {
     console.log(`✅ Found ${participants.length} participants`);
 
     // 3️⃣ Prepare recipients with proper phone number format
+    const isSmartFields = eventData.field_mode === "smart_fields";
+
     const recipients = participants.map((p) => {
       // Format phone number to E.164 format (with + prefix)
       let formattedPhone = String(p.phone_number || "").trim();
 
-      // Add + if missing
       if (formattedPhone && !formattedPhone.startsWith("+")) {
         formattedPhone = "+" + formattedPhone;
       }
 
       console.log(`📱 Participant ${p.participant_id} phone:`, formattedPhone);
+
+      // Smart fields: pass event_id + participant_id (snake_case) so the
+      // ElevenLabs tool can include them in the POST body to /api/events/rsvp-responses.
+      // Classic: keep original camelCase variables used by the fixed agent prompt.
+      const dynamic_variables = isSmartFields
+        ? {
+            event_id: String(eventId),
+            event_name: String(eventData.event_name),
+            participant_id: String(p.participant_id),
+          }
+        : {
+            eventId: String(eventId),
+            eventName: String(eventData.event_name),
+          };
 
       const recipient = {
         id: String(p.participant_id),
@@ -503,12 +611,9 @@ export const triggerBatchCall = async (req, res) => {
               voice_id: null,
             },
           },
-          dynamic_variables: {
-            eventId: String(eventId),
-            eventName: String(eventData.event_name),
-          },
+          dynamic_variables,
         },
-        phone_number: formattedPhone, // ✅ Now with + prefix
+        phone_number: formattedPhone,
       };
 
       return recipient;
@@ -975,7 +1080,15 @@ export const deleteEvent = async (req, res) => {
         .from("conversation_results")
         .delete()
         .in("participant_id", participantIds);
+      // Delete smart RSVP responses linked to participants
+      await supabase
+        .from("event_rsvp_responses")
+        .delete()
+        .in("participant_id", participantIds);
     }
+
+    // Delete smart field definitions for the event
+    await supabase.from("event_smart_fields").delete().eq("event_id", eventId);
     // :star::star::star: NEW STEP: DELETE FILES FROM SUPABASE STORAGE :star::star::star:
     try {
       if (participantIds.length > 0) {

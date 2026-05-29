@@ -64,14 +64,55 @@ export const getAgentTemplate = async (req, res) => {
 };
 
 /**
- * POST /api/agents/create
- * Create new agent from template
+ * Builds a dynamic ElevenLabs system prompt from smart_fields definitions.
+ */
+function buildSmartFieldsSystemPrompt(smartFields, eventTitle) {
+  const sorted = [...smartFields].sort(
+    (a, b) => (a.display_order || 0) - (b.display_order || 0),
+  );
+
+  const questionLines = sorted
+    .map((f, i) => {
+      let line = `${i + 1}. ${f.field_label}: ${f.ai_question}`;
+      if (f.field_type === "yes_no") line += " (collect Yes or No)";
+      else if (f.field_type === "number") line += " (collect a number)";
+      else if (
+        f.field_type === "choice" &&
+        Array.isArray(f.options) &&
+        f.options.length
+      ) {
+        line += ` (options: ${f.options.join(" / ")})`;
+      }
+      if (!f.is_required) line += " [optional]";
+      return line;
+    })
+    .join("\n");
+
+  return `You are a professional RSVP assistant calling guests for the event "${eventTitle}".
+
+Collect the following information conversationally:
+${questionLines}
+
+Guidelines:
+- Be warm, friendly, and professional
+- Ask one question at a time naturally
+- Skip optional questions if the guest seems busy or declines
+- If the guest cannot attend, skip questions that only apply to attendees
+- Thank the guest and close the call after collecting all required information`;
+}
+
+/**
+ * POST /api/agent-system/create
+ *
+ * Classic mode  → template_id + knowledge_base_id required.
+ *                 Duplicates the base ElevenLabs agent. KB stored in DB only.
+ *
+ * Smart fields  → knowledge_base_id + smart_fields[] required. No template_id.
+ *                 Uses ELEVENLABS_DYNAMIC_AGENT_ID from env (no duplication).
+ *                 Injects KB + dynamic prompt into ElevenLabs, saves first_message
+ *                 and system_prompt to DB.
  */
 export const createAgent = async (req, res) => {
-  const BASE_AGENTS = {
-    wedding: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
-  };
-
   try {
     const {
       user_id,
@@ -80,31 +121,52 @@ export const createAgent = async (req, res) => {
       agent_description,
       knowledge_base_id,
       event_title,
+      field_mode = "classic",
+      smart_fields = [],
     } = req.body;
 
-    // Validate required fields
-    if (!user_id || !template_id || !agent_name || !event_title) {
+    // Common required fields
+    if (!user_id || !agent_name) {
       return res.status(400).json({
         success: false,
-        error: "user_id, template_id, event_title and agent_name are required",
+        error: "user_id and agent_name are required",
       });
     }
 
-    // Verify template exists
-    const { data: template, error: templateError } = await supabase
-      .from("agent_templates")
-      .select("*")
-      .eq("template_id", template_id)
-      .single();
-
-    if (templateError || !template) {
-      return res.status(404).json({
+    if (!["classic", "smart_fields"].includes(field_mode)) {
+      return res.status(400).json({
         success: false,
-        error: "Agent template not found",
+        error: "field_mode must be 'classic' or 'smart_fields'",
       });
     }
 
-    //A) Fetch KB from DB
+    if (!knowledge_base_id) {
+      return res.status(400).json({
+        success: false,
+        error: "knowledge_base_id is required",
+      });
+    }
+
+    // Mode-specific validation
+    if (field_mode === "classic" && !template_id) {
+      return res.status(400).json({
+        success: false,
+        error: "template_id is required for classic mode",
+      });
+    }
+
+    if (
+      field_mode === "smart_fields" &&
+      (!Array.isArray(smart_fields) || smart_fields.length === 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "smart_fields array is required and must not be empty for smart_fields mode",
+      });
+    }
+
+    // Fetch KB (required for both modes)
     const { data: kb, error: kbError } = await supabase
       .from("knowledge_bases")
       .select("*")
@@ -112,82 +174,136 @@ export const createAgent = async (req, res) => {
       .single();
 
     if (kbError || !kb) {
-      return res.status(400).json({ error: "Invalid knowledge base" });
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid knowledge base" });
     }
 
-    //B) Duplicate agent
-    const baseAgentId = "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw";
+    // ─── CLASSIC MODE ────────────────────────────────────────────────────────
+    if (field_mode === "classic") {
+      // Verify template
+      const { data: template, error: templateError } = await supabase
+        .from("agent_templates")
+        .select("*")
+        .eq("template_id", template_id)
+        .single();
 
-    if (!baseAgentId) {
-      return res.status(400).json({ error: "Invalid Event Type" });
+      if (templateError || !template) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Agent template not found" });
+      }
+
+      //1) Duplicate base ElevenLabs agent
+      const duplicatedAgent = await duplicateAgent({
+        agentId: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
+        name: `${agent_name} Agent`,
+      });
+
+      //2) Get duplicated agent config
+      const agentConfig = await getAgent(duplicatedAgent.agent_id);
+
+      //3) Inject TEXT knowledge base into duplicated ElevenLabs agent config (classic mode uses TEXT KB only)
+      agentConfig.conversation_config.agent.prompt.knowledge_base = [
+        {
+          type: "text",
+          id: kb.elevenlabs_kb_id,
+          name: kb.name,
+          usage_mode: "auto",
+        },
+      ];
+
+      //4) Update agent (PATCH)
+      await updateAgent({
+        agentId: duplicatedAgent.agent_id,
+        payload: agentConfig,
+      });
+
+      // Save to DB — KB stored here only, no ElevenLabs config changes
+      const { data: agent, error: agentError } = await supabase
+        .from("agents")
+        .insert({
+          user_id,
+          template_id,
+          agent_name,
+          agent_description,
+          knowledge_base_id,
+          elevenlabs_agent_id: duplicatedAgent.agent_id,
+          status: "unassigned",
+          event_title,
+          field_mode: "classic",
+        })
+        .select(
+          `*, agent_templates (name, slug, icon_url, config), knowledge_bases (id, name)`,
+        )
+        .single();
+
+      if (agentError) throw agentError;
+
+      return res.status(201).json({ success: true, data: agent });
     }
 
-    const duplicatedAgent = await duplicateAgent({
-      agentId: baseAgentId,
-      name: `${agent_name} Agent`,
-    });
+    // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
+    const dynamicAgentId = process.env.ELEVENLABS_DYNAMIC_AGENT_ID;
+    if (!dynamicAgentId) {
+      return res.status(500).json({
+        success: false,
+        error: "ELEVENLABS_DYNAMIC_AGENT_ID is not configured in environment",
+      });
+    }
 
-    //C) Get duplicated agent config
-    const agentConfig = await getAgent(duplicatedAgent.agent_id);
+    const first_message = req.body.first_message || null;
 
-    //D) Inject TEXT knowledge base
-    agentConfig.conversation_config.agent.prompt.knowledge_base = [
-      {
-        type: "text",
-        id: kb.elevenlabs_kb_id,
-        name: kb.name,
-        usage_mode: "auto",
-      },
-    ];
+    // // Get config from the shared dynamic ElevenLabs agent
+    // const agentConfig = await getAgent(dynamicAgentId);
 
-    //E) Update agent (PATCH)
-    await updateAgent({
-      agentId: duplicatedAgent.agent_id,
-      payload: agentConfig,
-    });
+    // // Extract first_message before modifying the config
+    // const first_message =
+    //   agentConfig?.conversation_config?.agent?.first_message || null;
 
-    // Create agent
+    // // Inject KB into ElevenLabs agent config
+    // agentConfig.conversation_config.agent.prompt.knowledge_base = [
+    //   {
+    //     type: "text",
+    //     id: kb.elevenlabs_kb_id,
+    //     name: kb.name,
+    //     usage_mode: "auto",
+    //   },
+    // ];
+
+    // // Build dynamic system prompt from smart_fields and inject
+    // const final_system_prompt = buildSmartFieldsSystemPrompt(smart_fields, event_title);
+    // agentConfig.conversation_config.agent.prompt.prompt = final_system_prompt;
+
+    // // PATCH the dynamic ElevenLabs agent
+    // await updateAgent({ agentId: dynamicAgentId, payload: agentConfig });
+
+    // Save to DB with smart fields metadata
     const { data: agent, error: agentError } = await supabase
       .from("agents")
       .insert({
         user_id,
-        template_id,
+        template_id: null,
         agent_name,
         agent_description,
         knowledge_base_id,
-        elevenlabs_agent_id: duplicatedAgent.agent_id,
+        elevenlabs_agent_id: dynamicAgentId,
         status: "unassigned",
-        event_title: event_title,
+        event_title,
+        field_mode: "smart_fields",
+        smart_fields,
+        first_message,
+        // system_prompt: final_system_prompt,
       })
-      .select(
-        `
-        *,
-        agent_templates (
-          name,
-          slug,
-          icon_url,
-          config
-        ),
-        knowledge_bases (
-          id,
-          name
-        )
-      `,
-      )
+      .select(`*, knowledge_bases (id, name)`)
       .single();
 
     if (agentError) throw agentError;
 
-    res.status(201).json({
-      success: true,
-      data: agent,
-    });
+    return res.status(201).json({ success: true, data: agent });
   } catch (error) {
     console.error("Error creating agent:", error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+    res.status(500).json({ success: false, error: error.message });
   }
 };
 

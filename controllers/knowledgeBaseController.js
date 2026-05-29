@@ -105,6 +105,43 @@ export const getKnowledgeBase = async (req, res) => {
   }
 };
 
+export const getKBContentForAgent = async (req, res) => {
+  try {
+    const { knowledge_base_id } = req.query;
+
+    if (!knowledge_base_id) {
+      return res.status(400).json({
+        success: false,
+        error: "knowledge_base_id is required",
+      });
+    }
+
+    const { data: entries, error } = await supabase
+      .from("knowledge_entries")
+      .select("content")
+      .eq("knowledge_base_id", knowledge_base_id);
+
+    if (error) throw error;
+
+    if (!entries || entries.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No content found for the given knowledge_base_id",
+      });
+    }
+
+    const content = entries.map((e) => e.content).join("\n\n");
+
+    res.json({ success: true, content });
+  } catch (err) {
+    console.error("❌ Get KB content for agent error:", err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Failed to fetch knowledge base content",
+    });
+  }
+};
+
 export const deleteKnowledgeBase = async (req, res) => {
   try {
     const { id } = req.params;

@@ -89,6 +89,12 @@ import {
   deleteEvent,
 } from "../controllers/eventController.js";
 
+import {
+  getEventSmartFields,
+  getSmartRsvpData,
+  saveRsvpResponses,
+} from "../controllers/smartFieldController.js";
+
 const router = express.Router();
 
 // File upload config
@@ -133,6 +139,11 @@ router.get(
 
 // Dashboard data
 router.get("/:eventId/dashboard", getDashboardData);
+
+// Smart fields endpoints
+router.get("/:eventId/smart-fields", getEventSmartFields);
+router.get("/:eventId/smart-rsvp-data", getSmartRsvpData);
+router.post("/rsvp-responses", saveRsvpResponses);
 
 // DELETE event
 router.delete("/:eventId", deleteEvent);

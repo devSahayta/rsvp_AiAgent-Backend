@@ -417,7 +417,9 @@ export const deleteAgentComplete = async (req, res) => {
     // 1️⃣ Check if agent exists
     const { data: agent, error: agentFetchError } = await supabase
       .from("agents")
-      .select("agent_id, knowledge_base_id, agent_name, elevenlabs_agent_id")
+      .select(
+        "agent_id, knowledge_base_id, agent_name, elevenlabs_agent_id, field_mode",
+      )
       .eq("agent_id", agent_id)
       .single();
 
@@ -452,19 +454,22 @@ export const deleteAgentComplete = async (req, res) => {
       });
     }
 
-    // 🤖 Delete ElevenLabs agent (if exists)
-    if (agent?.elevenlabs_agent_id) {
-      try {
-        await deleteAgent(agent.elevenlabs_agent_id);
-        console.log(
-          `🗑️ ElevenLabs agent deleted: ${agent.elevenlabs_agent_id}`,
-        );
-      } catch (agentErr) {
-        console.warn(
-          "⚠️ Failed to delete ElevenLabs agent:",
-          agentErr.response?.data || agentErr.message,
-        );
-        // DO NOT throw — event deletion must continue
+    // If not a smart field agent → proceed to delete ElevenLabs agent and its knowledge base (if any)
+    if (agent.field_mode === "classic") {
+      // 🤖 Delete ElevenLabs agent (if exists)
+      if (agent?.elevenlabs_agent_id) {
+        try {
+          await deleteAgent(agent.elevenlabs_agent_id);
+          console.log(
+            `🗑️ ElevenLabs agent deleted: ${agent.elevenlabs_agent_id}`,
+          );
+        } catch (agentErr) {
+          console.warn(
+            "⚠️ Failed to delete ElevenLabs agent:",
+            agentErr.response?.data || agentErr.message,
+          );
+          // DO NOT throw — event deletion must continue
+        }
       }
     }
 

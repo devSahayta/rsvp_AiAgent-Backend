@@ -19,7 +19,9 @@ export const getEventSmartFields = async (req, res) => {
     res.json({ success: true, data: data || [] });
   } catch (err) {
     console.error("getEventSmartFields error:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch smart fields" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch smart fields" });
   }
 };
 
@@ -59,7 +61,8 @@ export const getSmartRsvpData = async (req, res) => {
     // Group responses by participant_id → { field_key: response_value }
     const byParticipant = {};
     (responses || []).forEach((r) => {
-      if (!byParticipant[r.participant_id]) byParticipant[r.participant_id] = {};
+      if (!byParticipant[r.participant_id])
+        byParticipant[r.participant_id] = {};
       byParticipant[r.participant_id][r.field_key] = r.response_value;
     });
 
@@ -84,7 +87,9 @@ export const getSmartRsvpData = async (req, res) => {
     });
   } catch (err) {
     console.error("getSmartRsvpData error:", err);
-    res.status(500).json({ success: false, error: "Failed to fetch smart RSVP data" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch smart RSVP data" });
   }
 };
 
@@ -101,6 +106,7 @@ export const getSmartRsvpData = async (req, res) => {
  * }
  */
 export const saveRsvpResponses = async (req, res) => {
+  console.log("saveRsvpResponses called with body:", req.body);
   try {
     const { event_id, participant_id, response_data } = req.body;
 
@@ -115,7 +121,9 @@ export const saveRsvpResponses = async (req, res) => {
     let parsedData;
     try {
       parsedData =
-        typeof response_data === "string" ? JSON.parse(response_data) : response_data;
+        typeof response_data === "string"
+          ? JSON.parse(response_data)
+          : response_data;
     } catch {
       return res.status(400).json({
         success: false,
@@ -134,19 +142,24 @@ export const saveRsvpResponses = async (req, res) => {
     // Build a lookup map: field_key → { field_id, field_label }
     const fieldMap = {};
     (smartFields || []).forEach((f) => {
-      fieldMap[f.field_key] = { field_id: f.field_id, field_label: f.field_label };
+      fieldMap[f.field_key] = {
+        field_id: f.field_id,
+        field_label: f.field_label,
+      };
     });
 
     // Build one upsert row per key in response_data
-    const rows = Object.entries(parsedData).map(([field_key, response_value]) => ({
-      event_id,
-      participant_id,
-      field_id: fieldMap[field_key]?.field_id || null,
-      field_key,
-      field_label: fieldMap[field_key]?.field_label || null,
-      response_value: String(response_value ?? ""),
-      collected_via: "voice",
-    }));
+    const rows = Object.entries(parsedData).map(
+      ([field_key, response_value]) => ({
+        event_id,
+        participant_id,
+        field_id: fieldMap[field_key]?.field_id || null,
+        field_key,
+        field_label: fieldMap[field_key]?.field_label || null,
+        response_value: String(response_value ?? ""),
+        collected_via: "voice",
+      }),
+    );
 
     if (rows.length === 0) {
       return res.json({ success: true, data: [] });
@@ -159,9 +172,12 @@ export const saveRsvpResponses = async (req, res) => {
 
     if (error) throw error;
 
+    console.log("RSVP responses saved:", data);
     res.json({ success: true, data });
   } catch (err) {
     console.error("saveRsvpResponses error:", err);
-    res.status(500).json({ success: false, error: "Failed to save RSVP responses" });
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to save RSVP responses" });
   }
 };

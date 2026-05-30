@@ -18,7 +18,7 @@ import {
 } from "../utils/elevenlabsApi.js";
 
 // ✅ NEW: Credit system imports
-import { 
+import {
   CREDIT_PRICING,
   calculateVoiceCredits,
   formatCredits,
@@ -582,9 +582,9 @@ export const triggerBatchCall = async (req, res) => {
     // ✅ CHECK CREDITS BEFORE STARTING BATCH
     // ✅ ============================================
     console.log("💰 Checking production batch call credits for user:", user_id);
-    
+
     const user = await getUserById(user_id);
-    
+
     if (!user) {
       console.error("❌ User not found:", user_id);
       return res.status(404).json({ error: "User not found" });
@@ -592,18 +592,24 @@ export const triggerBatchCall = async (req, res) => {
 
     // Estimate credits needed (assume 3 minutes average per call)
     const ESTIMATED_MINUTES_PER_CALL = 3;
-    const totalEstimatedMinutes = participants.length * ESTIMATED_MINUTES_PER_CALL;
-    const estimatedCredits = totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+    const totalEstimatedMinutes =
+      participants.length * ESTIMATED_MINUTES_PER_CALL;
+    const estimatedCredits =
+      totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
 
     console.log(`📊 Batch credit estimation:`);
     console.log(`   - Participants: ${participants.length}`);
-    console.log(`   - Estimated minutes: ${totalEstimatedMinutes} (${ESTIMATED_MINUTES_PER_CALL} min/call)`);
+    console.log(
+      `   - Estimated minutes: ${totalEstimatedMinutes} (${ESTIMATED_MINUTES_PER_CALL} min/call)`,
+    );
     console.log(`   - Estimated credits: ${estimatedCredits}`);
     console.log(`   - User balance: ${user.credits}`);
-    
+
     if (user.credits < estimatedCredits) {
-      console.log(`❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`);
-      
+      console.log(
+        `❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`,
+      );
+
       return res.status(402).json({
         error: "Insufficient credits to start batch call",
         current_balance: formatCredits(user.credits),
@@ -611,15 +617,48 @@ export const triggerBatchCall = async (req, res) => {
         shortfall: formatCredits(estimatedCredits - user.credits),
         participants_count: participants.length,
         estimated_minutes: totalEstimatedMinutes,
-        note: "Credits will be deducted based on actual call duration after calls complete"
+        note: "Credits will be deducted based on actual call duration after calls complete",
       });
     }
-    
-    console.log(`✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`);
+
+    console.log(
+      `✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`,
+    );
     // ✅ ============================================
 
     // 3️⃣ Prepare recipients with proper phone number format
     const isSmartFields = eventData.field_mode === "smart_fields";
+
+    // For smart_fields: fetch field definitions once and build the question block
+    // that tells the AI exactly what to ask and which field_key to map each answer to.
+    let smart_fields_block = "";
+    if (isSmartFields) {
+      const { data: smartFields } = await supabase
+        .from("event_smart_fields")
+        .select("field_key, field_label, field_type, ai_question, options, display_order")
+        .eq("event_id", eventId)
+        .order("display_order", { ascending: true });
+
+      if (smartFields && smartFields.length > 0) {
+        smart_fields_block = smartFields
+          .map((f, i) => {
+            let typeLine = `Type: ${f.field_type}`;
+            if (
+              f.field_type === "choice" &&
+              Array.isArray(f.options) &&
+              f.options.length
+            ) {
+              typeLine += ` | Options: ${f.options.join(", ")}`;
+            }
+            return (
+              `${i + 1}. Ask: "${f.ai_question}"\n` +
+              `   field_key: ${f.field_key}\n` +
+              `   ${typeLine}`
+            );
+          })
+          .join("\n\n");
+      }
+    }
 
     const recipients = participants.map((p) => {
       let formattedPhone = String(p.phone_number || "").trim();
@@ -638,6 +677,9 @@ export const triggerBatchCall = async (req, res) => {
             event_id: String(eventId),
             event_name: String(eventData.event_name),
             participant_id: String(p.participant_id),
+            guest_name: String(p.full_name),
+            knowledge_base_id: String(eventData.knowledge_base_id),
+            smart_fields_block,
           }
         : {
             eventId: String(eventId),
@@ -812,7 +854,7 @@ export const triggerBatchCall = async (req, res) => {
       credit_info: {
         estimated_credits: formatCredits(estimatedCredits),
         current_balance: formatCredits(user.credits),
-        note: "Actual credits will be deducted after calls complete based on real duration"
+        note: "Actual credits will be deducted after calls complete based on real duration",
       },
       debug: {
         event_id: eventId,
@@ -859,7 +901,7 @@ export const retryBatchCall = async (req, res) => {
     // ✅ CHECK CREDITS BEFORE RETRY
     // ✅ ============================================
     console.log("💰 Checking credits for batch retry, user:", user_id);
-    
+
     // Fetch batch details to count failed/pending calls
     const batchResponse = await fetch(
       `https://api.elevenlabs.io/v1/convai/batch-calling/${eventData.batch_id}`,
@@ -872,23 +914,24 @@ export const retryBatchCall = async (req, res) => {
     );
 
     const batchData = await batchResponse.json();
-    
+
     // Count failed/pending calls that will be retried
-    const failedCount = (batchData.recipients || []).filter(r => 
-      r.status === 'failed' || r.status === 'error' || r.status === 'pending'
+    const failedCount = (batchData.recipients || []).filter(
+      (r) =>
+        r.status === "failed" || r.status === "error" || r.status === "pending",
     ).length;
 
     console.log(`📊 Retry estimation: ${failedCount} calls to retry`);
 
     if (failedCount === 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "No failed calls to retry",
-        batch_status: batchData.status 
+        batch_status: batchData.status,
       });
     }
 
     const user = await getUserById(user_id);
-    
+
     if (!user) {
       console.error("❌ User not found:", user_id);
       return res.status(404).json({ error: "User not found" });
@@ -897,28 +940,33 @@ export const retryBatchCall = async (req, res) => {
     // Estimate credits needed (assume 3 minutes average per retry call)
     const ESTIMATED_MINUTES_PER_CALL = 3;
     const totalEstimatedMinutes = failedCount * ESTIMATED_MINUTES_PER_CALL;
-    const estimatedCredits = totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+    const estimatedCredits =
+      totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
 
     console.log(`📊 Retry credit estimation:`);
     console.log(`   - Failed calls: ${failedCount}`);
     console.log(`   - Estimated minutes: ${totalEstimatedMinutes}`);
     console.log(`   - Estimated credits: ${estimatedCredits}`);
     console.log(`   - User balance: ${user.credits}`);
-    
+
     if (user.credits < estimatedCredits) {
-      console.log(`❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`);
-      
+      console.log(
+        `❌ Insufficient credits: ${user.credits} < ${estimatedCredits}`,
+      );
+
       return res.status(402).json({
         error: "Insufficient credits to retry batch call",
         current_balance: formatCredits(user.credits),
         estimated_credits: formatCredits(estimatedCredits),
         shortfall: formatCredits(estimatedCredits - user.credits),
         failed_calls_count: failedCount,
-        note: "Credits will be deducted based on actual call duration after retry completes"
+        note: "Credits will be deducted based on actual call duration after retry completes",
       });
     }
-    
-    console.log(`✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`);
+
+    console.log(
+      `✅ Credit check passed: ${user.credits} >= ${estimatedCredits}`,
+    );
     // ✅ ============================================
 
     // 2️⃣ Call ElevenLabs Retry API
@@ -964,7 +1012,7 @@ export const retryBatchCall = async (req, res) => {
       credit_info: {
         estimated_credits: formatCredits(estimatedCredits),
         current_balance: formatCredits(user.credits),
-        note: "Actual credits will be deducted after retry completes"
+        note: "Actual credits will be deducted after retry completes",
       },
     });
   } catch (err) {

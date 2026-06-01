@@ -8,7 +8,7 @@ import { error } from "pdf-lib";
 
 export const createKnowledgeBase = async (req, res) => {
   try {
-    const { user_id, name, content } = req.body;
+    const { user_id, name, content, field_mode = "classic" } = req.body;
 
     if (!user_id) {
       return res.status(400).json({
@@ -24,14 +24,20 @@ export const createKnowledgeBase = async (req, res) => {
       });
     }
 
-    const elKb = await createTextKnowledgeBase({ name, text: content });
+    // Classic: create in ElevenLabs and store the returned ID.
+    // Smart fields: skip ElevenLabs, elevenlabs_kb_id stays null.
+    let elevenlabs_kb_id = null;
+    if (field_mode === "classic") {
+      const elKb = await createTextKnowledgeBase({ name, text: content });
+      elevenlabs_kb_id = elKb.id;
+    }
 
     const { data: kb, error } = await supabase
       .from("knowledge_bases")
       .insert({
         user_id,
         name,
-        elevenlabs_kb_id: elKb.id,
+        elevenlabs_kb_id,
       })
       .select()
       .single();
@@ -43,13 +49,11 @@ export const createKnowledgeBase = async (req, res) => {
       content,
     });
 
-    // 🔥 FIXED RESPONSE FORMAT (IMPORTANT)
     res.json({
       success: true,
       data: kb,
       message: "Knowledge base created successfully",
     });
-
   } catch (err) {
     console.error("❌ Create KB error:", err);
     res.status(500).json({

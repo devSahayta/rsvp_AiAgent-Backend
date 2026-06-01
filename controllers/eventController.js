@@ -626,7 +626,24 @@ export const triggerBatchCall = async (req, res) => {
     );
     // ✅ ============================================
 
-    // 3️⃣ Prepare recipients with proper phone number format
+    // 3️⃣ Fetch agent row once — need first_message and elevenlabs_agent_id for recipients
+    const { data: agentData, error: agentError } = await supabase
+      .from("agents")
+      .select("elevenlabs_agent_id, first_message")
+      .eq("agent_id", eventData.agent_id)
+      .single();
+
+    if (agentError || !agentData?.elevenlabs_agent_id) {
+      console.error("❌ ElevenLabs agent missing");
+      return res.status(400).json({
+        error: "ElevenLabs agent not configured properly",
+      });
+    }
+
+    const elevenAgentId = agentData.elevenlabs_agent_id;
+    const agentFirstMessage = agentData.first_message || null;
+
+    // 4️⃣ Prepare recipients with proper phone number format
     const isSmartFields = eventData.field_mode === "smart_fields";
 
     // For smart_fields: fetch field definitions once and build the question block
@@ -635,7 +652,9 @@ export const triggerBatchCall = async (req, res) => {
     if (isSmartFields) {
       const { data: smartFields } = await supabase
         .from("event_smart_fields")
-        .select("field_key, field_label, field_type, ai_question, options, display_order")
+        .select(
+          "field_key, field_label, field_type, ai_question, options, display_order",
+        )
         .eq("event_id", eventId)
         .order("display_order", { ascending: true });
 
@@ -692,7 +711,7 @@ export const triggerBatchCall = async (req, res) => {
           conversation_config_override: {
             agent: {
               prompt: null,
-              first_message: null,
+              first_message: agentFirstMessage,
               language: null,
             },
             tts: {
@@ -715,22 +734,6 @@ export const triggerBatchCall = async (req, res) => {
       "⏰ Scheduled for:",
       new Date(scheduledUnix * 1000).toISOString(),
     );
-
-    // Get real elevenlabs agent
-    const { data: agentData, error: agentError } = await supabase
-      .from("agents")
-      .select("elevenlabs_agent_id")
-      .eq("agent_id", eventData.agent_id)
-      .single();
-
-    if (agentError || !agentData?.elevenlabs_agent_id) {
-      console.error("❌ ElevenLabs agent missing");
-      return res.status(400).json({
-        error: "ElevenLabs agent not configured properly",
-      });
-    }
-
-    const elevenAgentId = agentData.elevenlabs_agent_id;
 
     console.log("🤖 Using ElevenLabs Agent:", elevenAgentId);
 

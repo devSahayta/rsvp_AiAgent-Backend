@@ -75,11 +75,6 @@ import {
   getEventDetails,
   getConversationStatus,
   getEventParticipants,
-} from "../controllers/eventController.js";
-
-import { authenticateUser } from "../middleware/authMiddleware.js";
-
-import {
   triggerBatchCall,
   getRSVPDataByEvent,
   retryBatchCall,
@@ -89,13 +84,18 @@ import {
   deleteEvent,
 } from "../controllers/eventController.js";
 
+import { authenticateUser } from "../middleware/authMiddleware.js";
+
 import {
   getEventSmartFields,
   getSmartRsvpData,
   saveRsvpResponses,
 } from "../controllers/smartFieldController.js";
 
-import { getParticipantTranscript } from "../controllers/transcriptController.js";
+import {
+  getParticipantTranscript,
+  getParticipantAudio,
+} from "../controllers/transcriptController.js";
 
 const router = express.Router();
 
@@ -113,7 +113,10 @@ router.post("/", upload.single("dataset"), createEventWithCsv);
 // Get user events
 router.get("/", getEventsByUser);
 
-// Get single event BY ID  (KEEP ONLY THIS)
+// Smart fields endpoints (keep before /:eventId to avoid conflict)
+router.post("/rsvp-responses", saveRsvpResponses);
+
+// Get single event by ID
 router.get("/:eventId", getEventById);
 
 // Batch operations
@@ -126,8 +129,15 @@ router.get("/:eventId/batch-status", getBatchStatus);
 router.get("/:eventId/rsvps", getRSVPDataByEvent);
 router.get("/:eventId/rsvp-data", getEventRSVPData);
 
-//get all participant from event ID
+// Participants
 router.get("/:event_id/participants", getEventParticipants);
+
+// Transcript + Audio — per participant
+router.get(
+  "/:eventId/participants/:participantId/transcript",
+  getParticipantTranscript,
+);
+router.get("/:eventId/participants/:participantId/audio", getParticipantAudio);
 
 // Event details (Protected)
 router.get("/:eventId/details", authenticateUser, getEventDetails);
@@ -142,17 +152,11 @@ router.get(
 // Dashboard data
 router.get("/:eventId/dashboard", getDashboardData);
 
-// Smart fields endpoints
+// Smart fields
 router.get("/:eventId/smart-fields", getEventSmartFields);
 router.get("/:eventId/smart-rsvp-data", getSmartRsvpData);
-router.post("/rsvp-responses", saveRsvpResponses);
 
 // DELETE event
 router.delete("/:eventId", deleteEvent);
-
-router.get(
-  "/:eventId/participants/:participantId/transcript",
-  getParticipantTranscript,
-);
 
 export default router;

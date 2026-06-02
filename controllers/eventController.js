@@ -626,7 +626,24 @@ export const triggerBatchCall = async (req, res) => {
     );
     // ✅ ============================================
 
-    // 3️⃣ Prepare recipients with proper phone number format
+    // 3️⃣ Fetch agent row once — need first_message and elevenlabs_agent_id for recipients
+    const { data: agentData, error: agentError } = await supabase
+      .from("agents")
+      .select("elevenlabs_agent_id, first_message")
+      .eq("agent_id", eventData.agent_id)
+      .single();
+
+    if (agentError || !agentData?.elevenlabs_agent_id) {
+      console.error("❌ ElevenLabs agent missing");
+      return res.status(400).json({
+        error: "ElevenLabs agent not configured properly",
+      });
+    }
+
+    const elevenAgentId = agentData.elevenlabs_agent_id;
+    const agentFirstMessage = agentData.first_message || null;
+
+    // 4️⃣ Prepare recipients with proper phone number format
     const isSmartFields = eventData.field_mode === "smart_fields";
 
     // For smart_fields: fetch field definitions once and build the question block
@@ -694,7 +711,7 @@ export const triggerBatchCall = async (req, res) => {
           conversation_config_override: {
             agent: {
               prompt: null,
-              first_message: null,
+              first_message: agentFirstMessage,
               language: null,
             },
             tts: {
@@ -717,22 +734,6 @@ export const triggerBatchCall = async (req, res) => {
       "⏰ Scheduled for:",
       new Date(scheduledUnix * 1000).toISOString(),
     );
-
-    // Get real elevenlabs agent
-    const { data: agentData, error: agentError } = await supabase
-      .from("agents")
-      .select("elevenlabs_agent_id")
-      .eq("agent_id", eventData.agent_id)
-      .single();
-
-    if (agentError || !agentData?.elevenlabs_agent_id) {
-      console.error("❌ ElevenLabs agent missing");
-      return res.status(400).json({
-        error: "ElevenLabs agent not configured properly",
-      });
-    }
-
-    const elevenAgentId = agentData.elevenlabs_agent_id;
 
     console.log("🤖 Using ElevenLabs Agent:", elevenAgentId);
 
@@ -1027,10 +1028,10 @@ export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // 1. Fetch event to get batch_id
+    // 1. Fetch event to get batch_id + field_mode
     const { data: eventData, error: eventError } = await supabase
       .from("events")
-      .select("batch_id")
+      .select("batch_id, field_mode")
       .eq("event_id", eventId)
       .single();
 
@@ -1039,6 +1040,7 @@ export const syncBatchStatuses = async (req, res) => {
     }
 
     const batchId = eventData.batch_id;
+    const isSmartFields = eventData.field_mode === "smart_fields";
 
     // 2. Fetch ElevenLabs batch details
     const elevenResponse = await fetch(
@@ -1055,10 +1057,9 @@ export const syncBatchStatuses = async (req, res) => {
 
     if (!elevenResponse.ok) {
       console.error("ElevenLabs API error:", batchData);
-      return res.status(500).json({
-        error: "Failed to fetch batch details",
-        details: batchData,
-      });
+      return res
+        .status(500)
+        .json({ error: "Failed to fetch batch details", details: batchData });
     }
 
     const recipients = batchData.recipients || [];
@@ -1073,7 +1074,7 @@ export const syncBatchStatuses = async (req, res) => {
 
     if (partError) throw partError;
 
-    // 🚫 Chatbot-managed protected call statuses (DO NOT OVERWRITE)
+    // 🚫 Chatbot-managed protected call statuses (classic mode — DO NOT OVERWRITE)
     const protectedStatuses = [
       "awaiting_rsvp",
       "awaiting_additional_attendee_name",
@@ -1090,11 +1091,10 @@ export const syncBatchStatuses = async (req, res) => {
       "completed",
     ];
 
-    // 4. Map recipients to participants via phone number
     let updatedCount = 0;
 
     for (const recipient of recipients) {
-      // ✅ Normalise phone for matching — strip leading + from both sides
+      // Normalise phone — strip leading + from both sides before matching
       const recipientPhone = String(recipient.phone_number || "").replace(
         /^\+/,
         "",
@@ -1112,31 +1112,50 @@ export const syncBatchStatuses = async (req, res) => {
         continue;
       }
 
-      // Fetch current stored status
+      // ── SMART FIELDS mode ─────────────────────────────────────────────────
+      // Upsert call metadata into event_call_logs only (conversation_results not used)
+      if (isSmartFields) {
+        if (recipient.conversation_id) {
+          const { error: upsertErr } = await supabase
+            .from("event_call_logs")
+            .upsert(
+              {
+                event_id: eventId,
+                participant_id: participant.participant_id,
+                conversation_id: recipient.conversation_id,
+                call_outcome: recipient.status,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: "event_id,participant_id" },
+            );
+
+          if (!upsertErr) updatedCount++;
+          else console.error("⚠️ event_call_logs upsert error:", upsertErr);
+        }
+        continue; // skip conversation_results update for smart fields
+      }
+
+      // ── CLASSIC mode ──────────────────────────────────────────────────────
+      // Fetch current stored status to check if chatbot controls it
       const { data: existing } = await supabase
         .from("conversation_results")
         .select("call_status")
         .eq("participant_id", participant.participant_id)
         .maybeSingle();
 
-      // 🚫 If Chatbot controls this state → do NOT overwrite
       if (protectedStatuses.includes(existing?.call_status)) {
-        continue;
+        continue; // chatbot owns this state — don't overwrite
       }
 
-      // ✅ Save call_status AND conversation_id
       const { error: updateError } = await supabase
         .from("conversation_results")
-        .update({
-          call_status: recipient.status,
-          conversation_id: recipient.conversation_id || null,
-        })
+        .update({ call_status: recipient.status })
         .eq("participant_id", participant.participant_id);
 
       if (!updateError) updatedCount++;
     }
 
-    // 5. Update batch_status in events
+    // 4. Update batch_status in events
     await supabase
       .from("events")
       .update({ batch_status: batchData.status })

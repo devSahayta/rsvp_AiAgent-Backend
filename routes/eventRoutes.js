@@ -95,6 +95,8 @@ import {
   saveRsvpResponses,
 } from "../controllers/smartFieldController.js";
 
+import { getParticipantTranscript } from "../controllers/transcriptController.js";
+
 const router = express.Router();
 
 // File upload config
@@ -134,7 +136,7 @@ router.get("/:eventId/details", authenticateUser, getEventDetails);
 router.get(
   "/:eventId/conversation-status",
   authenticateUser,
-  getConversationStatus
+  getConversationStatus,
 );
 
 // Dashboard data
@@ -147,5 +149,10 @@ router.post("/rsvp-responses", saveRsvpResponses);
 
 // DELETE event
 router.delete("/:eventId", deleteEvent);
+
+router.get(
+  "/:eventId/participants/:participantId/transcript",
+  getParticipantTranscript,
+);
 
 export default router;

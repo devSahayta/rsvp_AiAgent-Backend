@@ -635,7 +635,9 @@ export const triggerBatchCall = async (req, res) => {
     if (isSmartFields) {
       const { data: smartFields } = await supabase
         .from("event_smart_fields")
-        .select("field_key, field_label, field_type, ai_question, options, display_order")
+        .select(
+          "field_key, field_label, field_type, ai_question, options, display_order",
+        )
         .eq("event_id", eventId)
         .order("display_order", { ascending: true });
 
@@ -1092,11 +1094,23 @@ export const syncBatchStatuses = async (req, res) => {
     let updatedCount = 0;
 
     for (const recipient of recipients) {
-      const participant = participants.find(
-        (p) => p.phone_number === recipient.phone_number,
+      // ✅ Normalise phone for matching — strip leading + from both sides
+      const recipientPhone = String(recipient.phone_number || "").replace(
+        /^\+/,
+        "",
       );
 
-      if (!participant) continue;
+      const participant = participants.find((p) => {
+        const dbPhone = String(p.phone_number || "").replace(/^\+/, "");
+        return dbPhone === recipientPhone;
+      });
+
+      if (!participant) {
+        console.warn(
+          `⚠️ No participant matched for phone: ${recipient.phone_number}`,
+        );
+        continue;
+      }
 
       // Fetch current stored status
       const { data: existing } = await supabase
@@ -1110,10 +1124,13 @@ export const syncBatchStatuses = async (req, res) => {
         continue;
       }
 
-      // ✅ Safe to update with ElevenLabs status
+      // ✅ Save call_status AND conversation_id
       const { error: updateError } = await supabase
         .from("conversation_results")
-        .update({ call_status: recipient.status })
+        .update({
+          call_status: recipient.status,
+          conversation_id: recipient.conversation_id || null,
+        })
         .eq("participant_id", participant.participant_id);
 
       if (!updateError) updatedCount++;

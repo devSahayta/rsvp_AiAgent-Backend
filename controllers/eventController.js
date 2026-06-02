@@ -1028,10 +1028,10 @@ export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // 1. Fetch event to get batch_id
+    // 1. Fetch event — need batch_id and field_mode
     const { data: eventData, error: eventError } = await supabase
       .from("events")
-      .select("batch_id")
+      .select("batch_id, field_mode")
       .eq("event_id", eventId)
       .single();
 
@@ -1039,7 +1039,8 @@ export const syncBatchStatuses = async (req, res) => {
       return res.status(404).json({ error: "Batch not found for this event" });
     }
 
-    const batchId = eventData.batch_id;
+    const { batch_id: batchId, field_mode } = eventData;
+    const isSmartFields = field_mode === "smart_fields";
 
     // 2. Fetch ElevenLabs batch details
     const elevenResponse = await fetch(
@@ -1066,73 +1067,128 @@ export const syncBatchStatuses = async (req, res) => {
     if (recipients.length === 0)
       return res.status(400).json({ error: "No recipients found in batch" });
 
-    // 3. Fetch all participants for the event
-    const { data: participants, error: partError } = await supabase
-      .from("participants")
-      .select("participant_id, phone_number")
-      .eq("event_id", eventId);
-
-    if (partError) throw partError;
-
-    // 🚫 Chatbot-managed protected call statuses (DO NOT OVERWRITE)
-    const protectedStatuses = [
-      "awaiting_rsvp",
-      "awaiting_additional_attendee_name",
-      "awaiting_id_proof",
-      "awaiting_travel_doc_upload",
-      "awaiting_guest_count",
-      "awaiting_notes",
-      "awaiting_doc_role",
-      "awaiting_travel_docs_choice",
-      "awaiting_travel_doc_type",
-      "awaiting_arrival_info",
-      "awaiting_more_attendees",
-      "awaiting_more_travel_docs",
-      "completed",
-    ];
-
-    // 4. Map recipients to participants via phone number
     let updatedCount = 0;
 
-    for (const recipient of recipients) {
-      const participant = participants.find(
-        (p) => p.phone_number === recipient.phone_number,
-      );
+    // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
+    if (isSmartFields) {
+      // Load existing call logs for this event (to decide insert vs update)
+      const { data: existingLogs } = await supabase
+        .from("event_call_logs")
+        .select("call_log_id, participant_id")
+        .eq("event_id", eventId);
 
-      if (!participant) continue;
+      const logByParticipant = {};
+      (existingLogs || []).forEach((log) => {
+        logByParticipant[log.participant_id] = log.call_log_id;
+      });
 
-      // Fetch current stored status
-      const { data: existing } = await supabase
-        .from("conversation_results")
-        .select("call_status")
-        .eq("participant_id", participant.participant_id)
-        .maybeSingle();
+      for (const recipient of recipients) {
+        // participant_id is available directly from dynamic_variables
+        const participantId =
+          recipient.conversation_initiation_client_data?.dynamic_variables
+            ?.participant_id;
 
-      // 🚫 If Chatbot controls this state → do NOT overwrite
-      if (protectedStatuses.includes(existing?.call_status)) {
-        continue;
+        if (!participantId) continue;
+
+        const existingLogId = logByParticipant[participantId];
+
+        if (existingLogId) {
+          // Update existing call log row
+          const { error: updateError } = await supabase
+            .from("event_call_logs")
+            .update({
+              recipient_status: recipient.status,
+              conversation_id: recipient.conversation_id || null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("call_log_id", existingLogId);
+
+          if (!updateError) updatedCount++;
+        } else {
+          // Insert new call log row
+          const { error: insertError } = await supabase
+            .from("event_call_logs")
+            .insert({
+              event_id: eventId,
+              participant_id: participantId,
+              recipient_status: recipient.status,
+              conversation_id: recipient.conversation_id || null,
+              call_outcome: "pending",
+            });
+
+          if (!insertError) updatedCount++;
+        }
       }
+    } else {
+      // ─── CLASSIC MODE ────────────────────────────────────────────────────
+      // 3. Fetch all participants for the event (match by phone number)
+      const { data: participants, error: partError } = await supabase
+        .from("participants")
+        .select("participant_id, phone_number")
+        .eq("event_id", eventId);
 
-      // ✅ Safe to update with ElevenLabs status
-      const { error: updateError } = await supabase
-        .from("conversation_results")
-        .update({ call_status: recipient.status })
-        .eq("participant_id", participant.participant_id);
+      if (partError) throw partError;
 
-      if (!updateError) updatedCount++;
+      // Chatbot-managed protected statuses — do NOT overwrite
+      const protectedStatuses = [
+        "awaiting_rsvp",
+        "awaiting_additional_attendee_name",
+        "awaiting_id_proof",
+        "awaiting_travel_doc_upload",
+        "awaiting_guest_count",
+        "awaiting_notes",
+        "awaiting_doc_role",
+        "awaiting_travel_docs_choice",
+        "awaiting_travel_doc_type",
+        "awaiting_arrival_info",
+        "awaiting_more_attendees",
+        "awaiting_more_travel_docs",
+        "completed",
+      ];
+
+      for (const recipient of recipients) {
+        const participant = participants.find(
+          (p) => p.phone_number === recipient.phone_number,
+        );
+
+        if (!participant) continue;
+
+        // Fetch current stored status
+        const { data: existing } = await supabase
+          .from("conversation_results")
+          .select("call_status")
+          .eq("participant_id", participant.participant_id)
+          .maybeSingle();
+
+        if (protectedStatuses.includes(existing?.call_status)) continue;
+
+        const { error: updateError } = await supabase
+          .from("conversation_results")
+          .update({ call_status: recipient.status })
+          .eq("participant_id", participant.participant_id);
+
+        if (!updateError) updatedCount++;
+      }
     }
 
-    // 5. Update batch_status in events
+    // 4. Update events — batch_status + call counts (both modes)
     await supabase
       .from("events")
-      .update({ batch_status: batchData.status })
+      .update({
+        batch_status: batchData.status,
+        total_calls_dispatched: batchData.total_calls_dispatched ?? 0,
+        total_calls_finished: batchData.total_calls_finished ?? 0,
+      })
       .eq("event_id", eventId);
 
     return res.status(200).json({
       message: "Batch call statuses synced successfully",
+      field_mode,
       updated: updatedCount,
       total: recipients.length,
       batch_status: batchData.status,
+      total_calls_dispatched: batchData.total_calls_dispatched,
+      total_calls_finished: batchData.total_calls_finished,
     });
   } catch (err) {
     console.error("syncBatchStatuses error:", err);

@@ -54,7 +54,9 @@ export const getSmartRsvpData = async (req, res) => {
         .eq("event_id", eventId),
       supabase
         .from("event_call_logs")
-        .select("participant_id, conversation_id, call_duration, call_outcome, called_at")
+        .select(
+          "participant_id, conversation_id, call_duration, call_outcome, called_at, recipient_status",
+        )
         .eq("event_id", eventId),
     ]);
 
@@ -66,7 +68,8 @@ export const getSmartRsvpData = async (req, res) => {
     // Group responses by participant_id → { field_key: response_value }
     const byParticipant = {};
     (responses || []).forEach((r) => {
-      if (!byParticipant[r.participant_id]) byParticipant[r.participant_id] = {};
+      if (!byParticipant[r.participant_id])
+        byParticipant[r.participant_id] = {};
       byParticipant[r.participant_id][r.field_key] = r.response_value;
     });
 
@@ -89,6 +92,7 @@ export const getSmartRsvpData = async (req, res) => {
         call_duration: callLog.call_duration ?? null,
         call_outcome: callLog.call_outcome || null,
         called_at: callLog.called_at || null,
+        recipient_status: callLog.recipient_status || null,
       };
 
       (smartFields || []).forEach((f) => {
@@ -167,19 +171,24 @@ export const saveRsvpResponses = async (req, res) => {
     // Build a lookup map: field_key → { field_id, field_label }
     const fieldMap = {};
     (smartFields || []).forEach((f) => {
-      fieldMap[f.field_key] = { field_id: f.field_id, field_label: f.field_label };
+      fieldMap[f.field_key] = {
+        field_id: f.field_id,
+        field_label: f.field_label,
+      };
     });
 
     // Build one upsert row per key in response_data
-    const rows = Object.entries(parsedData).map(([field_key, response_value]) => ({
-      event_id,
-      participant_id,
-      field_id: fieldMap[field_key]?.field_id || null,
-      field_key,
-      field_label: fieldMap[field_key]?.field_label || null,
-      response_value: String(response_value ?? ""),
-      collected_via: "voice",
-    }));
+    const rows = Object.entries(parsedData).map(
+      ([field_key, response_value]) => ({
+        event_id,
+        participant_id,
+        field_id: fieldMap[field_key]?.field_id || null,
+        field_key,
+        field_label: fieldMap[field_key]?.field_label || null,
+        response_value: String(response_value ?? ""),
+        collected_via: "voice",
+      }),
+    );
 
     if (rows.length === 0) {
       return res.json({ success: true, data: [] });

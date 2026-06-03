@@ -1028,7 +1028,7 @@ export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
 
-    // 1. Fetch event to get batch_id + field_mode
+    // 1. Fetch event — need batch_id and field_mode
     const { data: eventData, error: eventError } = await supabase
       .from("events")
       .select("batch_id, field_mode")
@@ -1039,8 +1039,8 @@ export const syncBatchStatuses = async (req, res) => {
       return res.status(404).json({ error: "Batch not found for this event" });
     }
 
-    const batchId = eventData.batch_id;
-    const isSmartFields = eventData.field_mode === "smart_fields";
+    const { batch_id: batchId, field_mode } = eventData;
+    const isSmartFields = field_mode === "smart_fields";
 
     // 2. Fetch ElevenLabs batch details
     const elevenResponse = await fetch(
@@ -1066,106 +1066,121 @@ export const syncBatchStatuses = async (req, res) => {
     if (recipients.length === 0)
       return res.status(400).json({ error: "No recipients found in batch" });
 
-    // 3. Fetch all participants for the event
-    const { data: participants, error: partError } = await supabase
-      .from("participants")
-      .select("participant_id, phone_number")
-      .eq("event_id", eventId);
-
-    if (partError) throw partError;
-
-    // 🚫 Chatbot-managed protected call statuses (classic mode — DO NOT OVERWRITE)
-    const protectedStatuses = [
-      "awaiting_rsvp",
-      "awaiting_additional_attendee_name",
-      "awaiting_id_proof",
-      "awaiting_travel_doc_upload",
-      "awaiting_guest_count",
-      "awaiting_notes",
-      "awaiting_doc_role",
-      "awaiting_travel_docs_choice",
-      "awaiting_travel_doc_type",
-      "awaiting_arrival_info",
-      "awaiting_more_attendees",
-      "awaiting_more_travel_docs",
-      "completed",
-    ];
-
     let updatedCount = 0;
 
-    for (const recipient of recipients) {
-      // Normalise phone — strip leading + from both sides before matching
-      const recipientPhone = String(recipient.phone_number || "").replace(
-        /^\+/,
-        "",
-      );
+    // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
+    if (isSmartFields) {
+      const { data: existingLogs } = await supabase
+        .from("event_call_logs")
+        .select("call_log_id, participant_id")
+        .eq("event_id", eventId);
 
-      const participant = participants.find((p) => {
-        const dbPhone = String(p.phone_number || "").replace(/^\+/, "");
-        return dbPhone === recipientPhone;
+      const logByParticipant = {};
+      (existingLogs || []).forEach((log) => {
+        logByParticipant[log.participant_id] = log.call_log_id;
       });
 
-      if (!participant) {
-        console.warn(
-          `⚠️ No participant matched for phone: ${recipient.phone_number}`,
-        );
-        continue;
-      }
+      for (const recipient of recipients) {
+        const participantId =
+          recipient.conversation_initiation_client_data?.dynamic_variables
+            ?.participant_id;
 
-      // ── SMART FIELDS mode ─────────────────────────────────────────────────
-      // Upsert call metadata into event_call_logs only (conversation_results not used)
-      if (isSmartFields) {
-        if (recipient.conversation_id) {
-          const { error: upsertErr } = await supabase
+        if (!participantId) continue;
+
+        const existingLogId = logByParticipant[participantId];
+
+        if (existingLogId) {
+          const { error: updateError } = await supabase
             .from("event_call_logs")
-            .upsert(
-              {
-                event_id: eventId,
-                participant_id: participant.participant_id,
-                conversation_id: recipient.conversation_id,
-                call_outcome: recipient.status,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "event_id,participant_id" },
-            );
+            .update({
+              recipient_status: recipient.status,
+              conversation_id: recipient.conversation_id || null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("call_log_id", existingLogId);
 
-          if (!upsertErr) updatedCount++;
-          else console.error("⚠️ event_call_logs upsert error:", upsertErr);
+          if (!updateError) updatedCount++;
+        } else {
+          const { error: insertError } = await supabase
+            .from("event_call_logs")
+            .insert({
+              event_id: eventId,
+              participant_id: participantId,
+              recipient_status: recipient.status,
+              conversation_id: recipient.conversation_id || null,
+              call_outcome: "pending",
+            });
+
+          if (!insertError) updatedCount++;
         }
-        continue; // skip conversation_results update for smart fields
       }
+    } else {
+      // ─── CLASSIC MODE ────────────────────────────────────────────────────
+      const { data: participants, error: partError } = await supabase
+        .from("participants")
+        .select("participant_id, phone_number")
+        .eq("event_id", eventId);
 
-      // ── CLASSIC mode ──────────────────────────────────────────────────────
-      // Fetch current stored status to check if chatbot controls it
-      const { data: existing } = await supabase
-        .from("conversation_results")
-        .select("call_status")
-        .eq("participant_id", participant.participant_id)
-        .maybeSingle();
+      if (partError) throw partError;
 
-      if (protectedStatuses.includes(existing?.call_status)) {
-        continue; // chatbot owns this state — don't overwrite
+      const protectedStatuses = [
+        "awaiting_rsvp",
+        "awaiting_additional_attendee_name",
+        "awaiting_id_proof",
+        "awaiting_travel_doc_upload",
+        "awaiting_guest_count",
+        "awaiting_notes",
+        "awaiting_doc_role",
+        "awaiting_travel_docs_choice",
+        "awaiting_travel_doc_type",
+        "awaiting_arrival_info",
+        "awaiting_more_attendees",
+        "awaiting_more_travel_docs",
+        "completed",
+      ];
+
+      for (const recipient of recipients) {
+        const participant = participants.find(
+          (p) => p.phone_number === recipient.phone_number,
+        );
+
+        if (!participant) continue;
+
+        const { data: existing } = await supabase
+          .from("conversation_results")
+          .select("call_status")
+          .eq("participant_id", participant.participant_id)
+          .maybeSingle();
+
+        if (protectedStatuses.includes(existing?.call_status)) continue;
+
+        const { error: updateError } = await supabase
+          .from("conversation_results")
+          .update({ call_status: recipient.status })
+          .eq("participant_id", participant.participant_id);
+
+        if (!updateError) updatedCount++;
       }
-
-      const { error: updateError } = await supabase
-        .from("conversation_results")
-        .update({ call_status: recipient.status })
-        .eq("participant_id", participant.participant_id);
-
-      if (!updateError) updatedCount++;
     }
 
-    // 4. Update batch_status in events
+    // 4. Update events — batch_status + call counts (both modes)
     await supabase
       .from("events")
-      .update({ batch_status: batchData.status })
+      .update({
+        batch_status: batchData.status,
+        total_calls_dispatched: batchData.total_calls_dispatched ?? 0,
+        total_calls_finished: batchData.total_calls_finished ?? 0,
+      })
       .eq("event_id", eventId);
 
     return res.status(200).json({
       message: "Batch call statuses synced successfully",
+      field_mode,
       updated: updatedCount,
       total: recipients.length,
       batch_status: batchData.status,
+      total_calls_dispatched: batchData.total_calls_dispatched,
+      total_calls_finished: batchData.total_calls_finished,
     });
   } catch (err) {
     console.error("syncBatchStatuses error:", err);

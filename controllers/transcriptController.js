@@ -35,11 +35,13 @@ export const getParticipantTranscript = async (req, res) => {
 
     const data = response.data;
 
-    const transcript = (data.transcript || []).map((turn) => ({
-      role: turn.role === "agent" ? "assistant" : "user",
-      message: turn.message || turn.content || "",
-      time_in_call_secs: turn.time_in_call_secs ?? null,
-    }));
+    const transcript = (data.transcript || [])
+      .map((turn) => ({
+        role: turn.role === "agent" ? "assistant" : "user",
+        message: (turn.message || turn.content || "").trim(),
+        time_in_call_secs: turn.time_in_call_secs ?? null,
+      }))
+      .filter((turn) => turn.message.length > 0); // strip empty tool-call turns
 
     const duration =
       data.metadata?.call_duration_secs || callLog.call_duration || null;

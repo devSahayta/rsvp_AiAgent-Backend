@@ -17,12 +17,13 @@ import whatsappTemplateRoutes from "./routes/whatsappTemplateRoutes.js";
 import knowledgeBaseRoutes from "./routes/knowledgeBaseRoutes.js";
 import adminChatRoutes from "./routes/adminChatRoutes.js";
 import agentRoutes from "./routes/agentRoutes.js";
-import transportRoutes from './routes/transportRoutes.js';
+import transportRoutes from "./routes/transportRoutes.js";
 import flightTrackingRoutes from "./routes/flightRoutes.js";
 import agentSystemRoutes from "./routes/agentSystemRoutes.js";
 import { startVoiceTestSyncCron } from "./crons/voiceTestSyncCron.js";
 import { startProductionBatchSyncCron } from "./crons/productionBatchSyncCron.js";
 
+import samvaadikRoutes from "./routes/samvaadikRoutes.js";
 dotenv.config();
 startVoiceTestSyncCron();
 startProductionBatchSyncCron();
@@ -39,7 +40,7 @@ app.use(
       "https://sutrak.ai",
     ],
     credentials: true,
-  })
+  }),
 );
 
 // Always extract token (if present) so authenticateUser can rely on req.user
@@ -71,10 +72,13 @@ app.use("/api/flight-tracking", flightTrackingRoutes);
 //for elevenlabs agent
 app.use("/api/agents", agentRoutes);
 //Transport routes
-    app.use('/api/transport', transportRoutes);
+app.use("/api/transport", transportRoutes);
 
 // Agent system routes
 app.use("/api/agent-system", agentSystemRoutes);
+
+// add after other routes:
+app.use("/api/samvaadik", samvaadikRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

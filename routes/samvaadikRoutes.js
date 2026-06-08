@@ -11,6 +11,8 @@ import {
   getSamvaadikTemplates,
   getSamvaadikTemplateInfo,
   proxyTemplateMedia,
+  getSamvaadikTemplateMedia,
+  getSamvaadikTemplate,
 } from "../controllers/samvaadikConnectionController.js";
 
 const router = express.Router();
@@ -31,6 +33,8 @@ router.post("/verify", verifySamvaadikConnection);
 
 // DELETE /api/samvaadik/disconnect   → remove connection
 router.delete("/disconnect", disconnectSamvaadik);
+
+router.get("/templates/:wt_id/media", getSamvaadikTemplateMedia); // ← first
 
 router.get("/templates/:wt_id", getSamvaadikTemplateInfo);
 

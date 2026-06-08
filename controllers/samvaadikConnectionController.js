@@ -360,3 +360,95 @@ export const proxyTemplateMedia = async (req, res) => {
     return res.status(502).json({ error: "Failed to proxy media" });
   }
 };
+
+export const getSamvaadikTemplate = async (req, res) => {
+  try {
+    const user_id = req.user?.user_id;
+    if (!user_id) return res.status(401).json({ error: "Unauthorized" });
+
+    const { wt_id } = req.params;
+
+    const { data: conn, error: connErr } = await supabase
+      .from("samvaadik_connections")
+      .select("api_key, status")
+      .eq("user_id", user_id)
+      .maybeSingle();
+
+    if (connErr) throw connErr;
+    if (!conn || conn.status !== "active")
+      return res.status(400).json({ error: "No active Samvaadik connection" });
+
+    const result = await axios.get(
+      `${process.env.SAMVAADIK_BASE_URL}/templates/${wt_id}`,
+      { headers: { "X-API-Key": conn.api_key } },
+    );
+
+    return res.status(200).json(result.data);
+  } catch (err) {
+    console.error(
+      "getSamvaadikTemplate error:",
+      err.response?.data || err.message,
+    );
+    return res.status(500).json({ error: "Failed to fetch template" });
+  }
+};
+
+// ── Add to samvaadikRoutes.js ─────────────────────────────────────────────────
+// import { getSamvaadikTemplate } from "../controllers/samvaadikConnectionController.js";
+// router.get("/templates/:wt_id", getSamvaadikTemplate);
+// NOTE: add ABOVE the existing router.get("/templates", getSamvaadikTemplates)
+
+// ── Also add to samvaadikConnectionController.js ─────────────────────────────
+
+// GET /api/samvaadik/templates/:wt_id/media
+// Fetches fresh media URL from Samvaadik (which gets it from Meta Graph API)
+export const getSamvaadikTemplateMedia = async (req, res) => {
+  try {
+    const user_id = req.user?.user_id;
+    if (!user_id) return res.status(401).json({ error: "Unauthorized" });
+
+    const { wt_id } = req.params;
+
+    const { data: conn } = await supabase
+      .from("samvaadik_connections")
+      .select("api_key, status")
+      .eq("user_id", user_id)
+      .maybeSingle();
+
+    if (!conn || conn.status !== "active")
+      return res.status(400).json({ error: "No active Samvaadik connection" });
+
+    // Call Samvaadik's media-stream endpoint — returns actual image bytes
+    const response = await axios.get(
+      `${process.env.SAMVAADIK_BASE_URL}/templates/${wt_id}/media-stream`,
+      {
+        headers: { "X-API-Key": conn.api_key },
+        responseType: "stream",
+        timeout: 20000,
+      },
+    );
+
+    // Forward content-type and stream bytes to frontend
+    const contentType = response.headers["content-type"] || "image/jpeg";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    response.data.pipe(res);
+  } catch (err) {
+    console.error(
+      "getSamvaadikTemplateMedia error:",
+      err.response?.data || err.message,
+    );
+    // Return SVG placeholder so <img> doesn't break
+    return res
+      .status(200)
+      .setHeader("Content-Type", "image/svg+xml")
+      .send(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="160" viewBox="0 0 300 160">' +
+          '<rect width="300" height="160" fill="#1a1a22" rx="8"/>' +
+          '<text x="50%" y="45%" text-anchor="middle" fill="#3f3f46" font-size="22" dy=".3em">📷</text>' +
+          '<text x="50%" y="65%" text-anchor="middle" fill="#3f3f46" font-size="11" font-family="system-ui">Preview unavailable</text>' +
+          "</svg>",
+      );
+  }
+};

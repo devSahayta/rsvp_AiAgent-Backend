@@ -1,4 +1,4 @@
-// controllers/whatsappController.js - WITH PRODUCTION CREDIT DEDUCTION
+// controllers/whatsappController.js - WITH PRODUCTION CREDIT DEDUCTION + SMART FIELDS AGENT
 
 import dotenv from "dotenv";
 dotenv.config();
@@ -10,6 +10,7 @@ import {
   fetchMediaUrl,
 } from "../utils/whatsappClient.js";
 import decideNextStep from "../utils/aiDecisionEngine.js";
+import { agentChatEngine } from "../utils/agentChatEngine.js";
 import { supabase } from "../config/supabase.js";
 import * as chatCtrl from "./chatController.js";
 import { autoExtractFromImage } from "../utils/autoExtractor.js";
@@ -18,6 +19,7 @@ import {
   calculateChatCredits,
 } from "../config/creditPricing.js";
 import { getUserById, updateUserCredits } from "../models/userModel.js";
+import { generalChatEngine } from "../utils/generalChatEngine.js";
 
 const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
@@ -97,14 +99,14 @@ async function deductProductionChatCredits(userId, context = {}) {
 
     console.log(
       `[CREDITS] ✅ Deducted for user ${userId}: ` +
-      `${user.credits} → ${newCredits} (-${creditsToDeduct}) | ` +
-      `ctx: pid=${context.participant_id} event=${context.event_id}`
+        `${user.credits} → ${newCredits} (-${creditsToDeduct}) | ` +
+        `ctx: pid=${context.participant_id} event=${context.event_id}`,
     );
 
     return {
-      creditsDeducted:  creditsToDeduct,
-      newBalance:       newCredits,
-      wasInsufficient:  user.credits < creditsToDeduct,
+      creditsDeducted: creditsToDeduct,
+      newBalance: newCredits,
+      wasInsufficient: user.credits < creditsToDeduct,
     };
   } catch (err) {
     console.error("[CREDITS] ❌ Deduction error:", err.message);
@@ -153,13 +155,15 @@ async function saveTravelItinerary({
     };
 
     if (direction === "arrival") {
-      itineraryData.arrival_date         = extractedData.date || null;
-      itineraryData.arrival_time         = extractedData.time || null;
-      itineraryData.arrival_transport_no = extractedData.transport_number || null;
+      itineraryData.arrival_date = extractedData.date || null;
+      itineraryData.arrival_time = extractedData.time || null;
+      itineraryData.arrival_transport_no =
+        extractedData.transport_number || null;
     } else if (direction === "return") {
-      itineraryData.return_date         = extractedData.date || null;
-      itineraryData.return_time         = extractedData.time || null;
-      itineraryData.return_transport_no = extractedData.transport_number || null;
+      itineraryData.return_date = extractedData.date || null;
+      itineraryData.return_time = extractedData.time || null;
+      itineraryData.return_transport_no =
+        extractedData.transport_number || null;
     }
 
     if (existing) {
@@ -169,13 +173,13 @@ async function saveTravelItinerary({
       delete updateFields.participant_relatives_name;
 
       if (direction === "return" && existing.arrival_date) {
-        updateFields.arrival_date         = existing.arrival_date;
-        updateFields.arrival_time         = existing.arrival_time;
+        updateFields.arrival_date = existing.arrival_date;
+        updateFields.arrival_time = existing.arrival_time;
         updateFields.arrival_transport_no = existing.arrival_transport_no;
       }
       if (direction === "arrival" && existing.return_date) {
-        updateFields.return_date         = existing.return_date;
-        updateFields.return_time         = existing.return_time;
+        updateFields.return_date = existing.return_date;
+        updateFields.return_time = existing.return_time;
         updateFields.return_transport_no = existing.return_transport_no;
       }
 
@@ -189,7 +193,10 @@ async function saveTravelItinerary({
         console.error("❌ Error updating travel_itinerary:", updateError);
         return null;
       }
-      console.log(`✅ Travel itinerary updated for ${participant_relatives_name}:`, updated);
+      console.log(
+        `✅ Travel itinerary updated for ${participant_relatives_name}:`,
+        updated,
+      );
       return updated;
     } else {
       const { data: inserted, error: insertError } = await supabase
@@ -201,7 +208,10 @@ async function saveTravelItinerary({
         console.error("❌ Error inserting travel_itinerary:", insertError);
         return null;
       }
-      console.log(`✅ Travel itinerary created for ${participant_relatives_name}:`, inserted);
+      console.log(
+        `✅ Travel itinerary created for ${participant_relatives_name}:`,
+        inserted,
+      );
       return inserted;
     }
   } catch (err) {
@@ -218,7 +228,7 @@ function ensureCache(participant) {
   if (!convoCache.has(pid)) {
     const initial = {
       call_status: "awaiting_rsvp",
-      currentDoc:  { name: null, role: null, type: null },
+      currentDoc: { name: null, role: null, type: null },
       pendingDocs: [],
       lastUpdated: new Date(),
     };
@@ -240,9 +250,9 @@ async function ensureConversationRow(pid, eventId) {
       .from("conversation_results")
       .insert({
         participant_id: pid,
-        event_id:       eventId,
-        call_status:    "awaiting_rsvp",
-        last_updated:   new Date().toISOString(),
+        event_id: eventId,
+        call_status: "awaiting_rsvp",
+        last_updated: new Date().toISOString(),
       })
       .select()
       .maybeSingle();
@@ -271,7 +281,12 @@ async function ensureConversationRow(pid, eventId) {
   return existing;
 }
 
-async function uploadRemoteToBucket(mediaUrl, participantId, eventId, origFilename = null) {
+async function uploadRemoteToBucket(
+  mediaUrl,
+  participantId,
+  eventId,
+  origFilename = null,
+) {
   try {
     if (!mediaUrl) return null;
 
@@ -284,8 +299,8 @@ async function uploadRemoteToBucket(mediaUrl, participantId, eventId, origFilena
       return null;
     }
 
-    const buffer   = Buffer.from(await resp.arrayBuffer());
-    const ts       = Date.now();
+    const buffer = Buffer.from(await resp.arrayBuffer());
+    const ts = Date.now();
     const safeName = origFilename
       ? origFilename.replace(/\s+/g, "_")
       : `document_${ts}`;
@@ -296,7 +311,8 @@ async function uploadRemoteToBucket(mediaUrl, participantId, eventId, origFilena
     const { error } = await supabase.storage
       .from("participant-docs")
       .upload(storagePath, buffer, {
-        contentType: resp.headers.get("content-type") || "application/octet-stream",
+        contentType:
+          resp.headers.get("content-type") || "application/octet-stream",
         upsert: false,
       });
 
@@ -325,11 +341,11 @@ async function saveUploadRow({
       .insert({
         participant_id,
         participant_relatives_name: participant_relatives_name || null,
-        document_url:               document_url || null,
-        document_type:              document_type || "Document",
-        role:                       role || "Self",
-        proof_uploaded:             true,
-        created_at:                 new Date().toISOString(),
+        document_url: document_url || null,
+        document_type: document_type || "Document",
+        role: role || "Self",
+        proof_uploaded: true,
+        created_at: new Date().toISOString(),
       })
       .select();
 
@@ -351,9 +367,9 @@ async function saveUploadRow({
    --------------------------- */
 export const verifyWebhook = (req, res) => {
   const verify_token = process.env.WHATSAPP_VERIFY_TOKEN;
-  const mode         = req.query["hub.mode"];
-  const token        = req.query["hub.verify_token"];
-  const challenge    = req.query["hub.challenge"];
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
   if (mode && token) {
     if (mode === "subscribe" && token === verify_token) {
@@ -371,8 +387,8 @@ export const verifyWebhook = (req, res) => {
 export const handleIncomingMessage = async (req, res) => {
   console.log("🔹 FULL WHATSAPP PAYLOAD:", JSON.stringify(req.body, null, 2));
 
-  const value         = req.body.entry?.[0]?.changes?.[0]?.value;
-  const wabaId        = req.body.entry?.[0]?.id;
+  const value = req.body.entry?.[0]?.changes?.[0]?.value;
+  const wabaId = req.body.entry?.[0]?.id;
   const phoneNumberId = value?.metadata?.phone_number_id;
 
   if (!wabaId || !phoneNumberId) {
@@ -384,15 +400,15 @@ export const handleIncomingMessage = async (req, res) => {
   if (value?.statuses) {
     for (const statusObj of value.statuses) {
       const waMessageId = statusObj.id;
-      const status      = statusObj.status; // sent | delivered | read
-      const timestamp   = new Date(Number(statusObj.timestamp) * 1000);
+      const status = statusObj.status; // sent | delivered | read
+      const timestamp = new Date(Number(statusObj.timestamp) * 1000);
 
       console.log("📌 WA Status Update:", waMessageId, status);
 
       const updateData = { status };
-      if (status === "sent")      updateData.sent_at      = timestamp;
+      if (status === "sent") updateData.sent_at = timestamp;
       if (status === "delivered") updateData.delivered_at = timestamp;
-      if (status === "read")      updateData.read_at      = timestamp;
+      if (status === "read") updateData.read_at = timestamp;
 
       const { error } = await supabase
         .from("whatsapp_messages")
@@ -410,13 +426,13 @@ export const handleIncomingMessage = async (req, res) => {
   }
 
   try {
-    const message        = value?.messages?.[0];
+    const message = value?.messages?.[0];
     const businessNumber = process.env.WHATSAPP_BUSINESS_NUMBER;
 
     // ── Outgoing template echo from business number ──────────────────────
     if (message.from === businessNumber && message.type === "text") {
       const templateText = message.text?.body || "";
-      const to           = message.to || message.recipient_id || null;
+      const to = message.to || message.recipient_id || null;
 
       if (to) {
         const { data: participant } = await supabase
@@ -427,16 +443,17 @@ export const handleIncomingMessage = async (req, res) => {
 
         if (participant) {
           const chat = await chatCtrl.ensureChat({
-            event_id:    participant.event_id,
+            event_id: participant.event_id,
             phone_number: to,
             person_name: participant.full_name,
+            user_id: userId,
           });
           await chatCtrl.saveMessage({
-            chat_id:     chat.chat_id,
+            chat_id: chat.chat_id,
             sender_type: "ai",
-            message:     templateText,
+            message: templateText,
             message_type: "text",
-            media_path:  null,
+            media_path: null,
           });
           console.log("💾 Auto-saved template message:", templateText);
         }
@@ -446,7 +463,7 @@ export const handleIncomingMessage = async (req, res) => {
 
     if (!message) return res.sendStatus(200);
 
-    const from         = message.from;
+    const from = message.from;
     const incomingType = message.type || "text";
 
     let userText = message.text?.body?.trim() ?? "";
@@ -454,22 +471,19 @@ export const handleIncomingMessage = async (req, res) => {
       userText = message?.button?.payload || message?.button?.text || userText;
     }
 
-    let mediaId      = null;
+    let mediaId = null;
     let origFilename = null;
     if (
       incomingType === "image" ||
       incomingType === "document" ||
       incomingType === "video"
     ) {
-      mediaId      = message[incomingType]?.id || null;
+      mediaId = message[incomingType]?.id || null;
       origFilename = message.document?.filename || null;
     }
 
     let mediaUrl =
-      message.image?.url ||
-      message.document?.url ||
-      message.video?.url ||
-      null;
+      message.image?.url || message.document?.url || message.video?.url || null;
 
     if (!mediaUrl && mediaId && typeof fetchMediaUrl === "function") {
       try {
@@ -482,7 +496,7 @@ export const handleIncomingMessage = async (req, res) => {
     console.log("📩 Incoming:", {
       from,
       incomingType,
-      preview:  (userText || "").slice(0, 120),
+      preview: (userText || "").slice(0, 120),
       mediaUrl: mediaUrl ? "YES" : "NO",
       mediaId,
     });
@@ -495,11 +509,15 @@ export const handleIncomingMessage = async (req, res) => {
       .eq("phone_number_id", phoneNumberId);
 
     if (waErr || !waAccounts?.length) {
-      console.error("❌ No WhatsApp accounts mapped", { wabaId, phoneNumberId });
+      console.error("❌ No WhatsApp accounts mapped", {
+        wabaId,
+        phoneNumberId,
+      });
       return res.sendStatus(200);
     }
 
     // ── Find chat row ────────────────────────────────────────────────────
+    // For smart fields: allow missing chat — it will be created later
     const { data: chatRow } = await supabase
       .from("chats")
       .select("chat_id, event_id, mode")
@@ -508,21 +526,50 @@ export const handleIncomingMessage = async (req, res) => {
       .limit(1)
       .maybeSingle();
 
-    if (!chatRow) {
-      console.warn("⚠️ No chat found for phone:", from);
-      return res.sendStatus(200);
-    }
+    // For smart fields sessions, chatRow may not exist yet — that's fine
+    // it gets created when the reply is logged
+
+    // if (!chatRow) {
+    //   console.warn("⚠️ No chat found for phone:", from);
+    //   return res.sendStatus(200);
+    // }
 
     // ── Find participant ─────────────────────────────────────────────────
-    const { data: participant } = await supabase
-      .from("participants")
-      .select("*")
-      .eq("phone_number", from)
-      .limit(1)
+    // First check if there's an active smart fields session for this phone
+    // If yes, use that session's event to find the right participant
+    const { data: activeWaSession } = await supabase
+      .from("whatsapp_ai_sessions")
+      .select("event_id, participant_id")
+      .eq("phone_number", String(from).replace(/^\+/, ""))
+      .eq("status", "active")
       .maybeSingle();
 
+    let participant;
+    if (activeWaSession?.participant_id) {
+      // Use session's participant directly — correct event guaranteed
+      const { data: sessionParticipant } = await supabase
+        .from("participants")
+        .select("*")
+        .eq("participant_id", activeWaSession.participant_id)
+        .maybeSingle();
+      participant = sessionParticipant;
+    } else {
+      // Classic fallback — use chatRow event_id if available, else latest
+      const { data: fallbackParticipant } = await supabase
+        .from("participants")
+        .select("*")
+        .eq("phone_number", from)
+        .eq("event_id", chatRow.event_id)
+        .maybeSingle();
+      participant = fallbackParticipant || null;
+    }
+
     if (!participant) {
-      console.warn("⚠️ Participant not found for phone:", from, chatRow.event_id);
+      console.warn(
+        "⚠️ Participant not found for phone:",
+        from,
+        chatRow.event_id,
+      );
       return res.sendStatus(200);
     }
 
@@ -548,11 +595,12 @@ export const handleIncomingMessage = async (req, res) => {
         }
 
         await chatCtrl.saveMessage({
-          chat_id:     userChatRow.chat_id,
+          chat_id: userChatRow.chat_id,
           sender_type: "user",
-          message:     userText || (mediaUrl ? `[${message.type.toUpperCase()}]` : "TEXT"),
+          message:
+            userText || (mediaUrl ? `[${message.type.toUpperCase()}]` : "TEXT"),
           message_type: message.type || "text",
-          media_path:  "Null",
+          media_path: "Null",
         });
 
         console.log("✅ Message saved for user:", user_id);
@@ -562,27 +610,32 @@ export const handleIncomingMessage = async (req, res) => {
 
     // ── Resolve event & user for credit deduction ────────────────────────
     const eventId = participant.event_id;
-    const userId  = await getUserIdForEvent(waAccounts, eventId);
+    const userId = await getUserIdForEvent(waAccounts, eventId);
 
-    console.log(`[CREDITS] 🔑 Resolved user_id: ${userId} for event: ${eventId}`);
+    console.log(
+      `[CREDITS] 🔑 Resolved user_id: ${userId} for event: ${eventId}`,
+    );
 
     // ── Pre-flight low-credit warning (never blocks) ─────────────────────
     if (userId) {
       try {
-        const creditUser      = await getUserById(userId);
+        const creditUser = await getUserById(userId);
         const requiredCredits = CREDIT_PRICING.PRODUCTION_CHAT_PER_MESSAGE;
 
         if (creditUser && creditUser.credits <= 0) {
           console.warn(
-            `[CREDITS] ⚠️ User ${userId} has 0 credits — message still goes through`
+            `[CREDITS] ⚠️ User ${userId} has 0 credits — message still goes through`,
           );
         } else if (creditUser && creditUser.credits < requiredCredits * 5) {
           console.warn(
-            `[CREDITS] ⚠️ Low balance for user ${userId}: ${creditUser.credits} credits remaining`
+            `[CREDITS] ⚠️ Low balance for user ${userId}: ${creditUser.credits} credits remaining`,
           );
         }
       } catch (e) {
-        console.error("[CREDITS] ❌ Pre-flight check failed (non-blocking):", e.message);
+        console.error(
+          "[CREDITS] ❌ Pre-flight check failed (non-blocking):",
+          e.message,
+        );
       }
     }
 
@@ -593,16 +646,16 @@ export const handleIncomingMessage = async (req, res) => {
       .eq("participant_id", participant.participant_id);
 
     const displayName = participant.full_name?.trim() || "Guest";
-    const pid         = participant.participant_id;
+    const pid = participant.participant_id;
 
-    let convo      = await ensureConversationRow(pid, eventId);
-    const cache    = ensureCache(participant);
+    let convo = await ensureConversationRow(pid, eventId);
+    const cache = ensureCache(participant);
     const callStatus =
       cache.call_status || convo.call_status || "awaiting_rsvp";
 
     // ── Upload media to bucket ───────────────────────────────────────────
     let storedMediaPath = null;
-    let publicUrl       = null;
+    let publicUrl = null;
 
     if (mediaUrl) {
       try {
@@ -617,10 +670,9 @@ export const handleIncomingMessage = async (req, res) => {
         storedMediaPath = uploadedPath;
         console.log("✅ Media stored at:", storedMediaPath);
 
-        const { data: signedData, error: signedError } =
-          await supabase.storage
-            .from("participant-docs")
-            .createSignedUrl(storedMediaPath, 3600);
+        const { data: signedData, error: signedError } = await supabase.storage
+          .from("participant-docs")
+          .createSignedUrl(storedMediaPath, 3600);
 
         if (signedError) {
           console.error("❌ Failed to generate signed URL:", signedError);
@@ -644,49 +696,167 @@ export const handleIncomingMessage = async (req, res) => {
     let extractionResult = null;
     if (shouldExtract) {
       console.log(
-        "🤖 Running automatic travel doc extraction (state: " + callStatus + ")"
+        "🤖 Running automatic travel doc extraction (state: " +
+          callStatus +
+          ")",
       );
 
       extractionResult = await autoExtractFromImage({ documentUrl: publicUrl });
       console.log("📤 Extraction result:", extractionResult);
 
       if (extractionResult?.success && extractionResult.extractedData) {
-        const data           = extractionResult.extractedData;
-        let formattedMessage  = `🛫 Travel Details Extracted:\n`;
-        formattedMessage     += `Date: ${data.date ?? "N/A"}\n`;
-        formattedMessage     += `Time: ${data.time ?? "N/A"}\n`;
-        formattedMessage     += `From: ${data.from_location ?? "N/A"}\n`;
-        formattedMessage     += `To: ${data.to_location ?? "N/A"}\n`;
-        formattedMessage     += `Transport No: ${data.transport_number ?? "N/A"}\n`;
-        formattedMessage     += `PNR: ${data.pnr ?? "N/A"}\n`;
-        formattedMessage     += `Passenger: ${data.passenger_name ?? "N/A"}`;
+        const data = extractionResult.extractedData;
+        let formattedMessage = `🛫 Travel Details Extracted:\n`;
+        formattedMessage += `Date: ${data.date ?? "N/A"}\n`;
+        formattedMessage += `Time: ${data.time ?? "N/A"}\n`;
+        formattedMessage += `From: ${data.from_location ?? "N/A"}\n`;
+        formattedMessage += `To: ${data.to_location ?? "N/A"}\n`;
+        formattedMessage += `Transport No: ${data.transport_number ?? "N/A"}\n`;
+        formattedMessage += `PNR: ${data.pnr ?? "N/A"}\n`;
+        formattedMessage += `Passenger: ${data.passenger_name ?? "N/A"}`;
         await sendWhatsAppTextMessage(from, formattedMessage);
       } else {
-        console.warn("⚠️ Extraction failed or no data:", extractionResult?.error);
+        console.warn(
+          "⚠️ Extraction failed or no data:",
+          extractionResult?.error,
+        );
       }
     } else {
       console.log(
         "ℹ️ Skipping extraction (state: " +
-        callStatus + ", has media: " + !!publicUrl + ")"
+          callStatus +
+          ", has media: " +
+          !!publicUrl +
+          ")",
       );
     }
 
-    // ── AI Decision Engine ───────────────────────────────────────────────
+    // ── Load full event (needed for both engines) ────────────────────────
+    const { data: fullEvent } = await supabase
+      .from("events")
+      .select("event_id, event_name, knowledge_base_id, field_mode, agent_id")
+      .eq("event_id", eventId)
+      .single();
+
+    // ── ROUTE: smart fields agent OR classic decideNextStep ──────────────
+    const isSmartFields =
+      fullEvent?.field_mode === "smart_fields" && !!fullEvent?.agent_id;
+
+    if (isSmartFields) {
+      // ── NEW: AgentChatEngine (smart fields WhatsApp bot) ─────────────
+      console.log(
+        "[whatsappController] 🤖 Smart fields mode — routing to agentChatEngine",
+      );
+
+      let agentReply;
+      try {
+        agentReply = await agentChatEngine({
+          phoneNumber: from,
+          userMessage: userText || "",
+          eventId,
+          participantId: participant.participant_id,
+          guestName: displayName,
+          event: fullEvent,
+        });
+      } catch (agentErr) {
+        console.error("[whatsappController] agentChatEngine error:", agentErr);
+        agentReply = null;
+      }
+
+      // agentReply === null means no active session — fall through to classic
+      if (agentReply !== null) {
+        // ── Send reply via Samvaadik if connected, else fallback ─────────
+        try {
+          const { data: conn } = await supabase
+            .from("samvaadik_connections")
+            .select("api_key, status")
+            .eq("user_id", userId)
+            .maybeSingle();
+
+          if (conn?.status === "active") {
+            const { sendText } = await import("../utils/samvaadikClient.js");
+            const normalised = String(from).startsWith("+") ? from : `+${from}`;
+            await sendText(conn.api_key, normalised, agentReply);
+            console.log(
+              "[whatsappController] ✅ Smart fields reply sent via Samvaadik",
+            );
+          } else {
+            await sendWhatsAppTextMessage(from, agentReply);
+            console.log(
+              "[whatsappController] ✅ Smart fields reply sent via direct WA",
+            );
+          }
+        } catch (sendErr) {
+          console.error(
+            "[whatsappController] ❌ Failed to send smart fields reply:",
+            sendErr.message,
+          );
+          await sendWhatsAppTextMessage(from, agentReply);
+        }
+
+        // ── Deduct credits ───────────────────────────────────────────────
+        const creditResult = await deductProductionChatCredits(userId, {
+          participant_id: pid,
+          event_id: eventId,
+          phone: from,
+          state: "smart_fields",
+        });
+
+        if (creditResult) {
+          console.log(
+            `[CREDITS] 💰 Result: -${creditResult.creditsDeducted} | ` +
+              `balance: ${creditResult.newBalance}` +
+              (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
+          );
+        }
+
+        // ── Save to chat logs ────────────────────────────────────────────
+        const chat = await chatCtrl.ensureChat({
+          event_id: eventId,
+          phone_number: from,
+          person_name: displayName,
+          user_id: userId,
+        });
+        await chatCtrl.saveMessage({
+          chat_id: chat.chat_id,
+          sender_type: "user",
+          message:
+            userText ||
+            (mediaUrl
+              ? `[${incomingType?.toUpperCase() || "MEDIA"}]`
+              : "[MESSAGE]"),
+          message_type:
+            incomingType === "text" ? "text" : incomingType || "text",
+          media_path: mediaUrl || null,
+        });
+        await chatCtrl.saveMessage({
+          chat_id: chat.chat_id,
+          sender_type: "ai",
+          message: agentReply,
+          message_type: "text",
+          media_path: null,
+        });
+
+        return res.sendStatus(200);
+      }
+
+      // agentReply === null → no active session → fall through to decideNextStep
+      console.log(
+        "[whatsappController] No active WA session — falling through to decideNextStep",
+      );
+    }
+
+    // ── EXISTING: Classic AI Decision Engine (decideNextStep) ────────────
+    // This section is completely unchanged from the original
     let decision;
     try {
-      const { data: fullEvent } = await supabase
-        .from("events")
-        .select("event_id, event_name, knowledge_base_id")
-        .eq("event_id", eventId)
-        .single();
-
       decision = await decideNextStep({
-        userMessage:      userText || "",
+        userMessage: userText || "",
         callStatus,
         participant,
         convo,
         cache,
-        event:            fullEvent || { event_name: "Event" },
+        event: fullEvent || { event_name: "Event" },
         incomingMediaUrl: storedMediaPath || null,
         uploadedDocuments,
       });
@@ -712,13 +882,13 @@ export const handleIncomingMessage = async (req, res) => {
       decision.reply ??
       `Sorry ${displayName}, I couldn't process that. Could you please rephrase?`;
     const nextState = decision.nextState ?? callStatus;
-    const actions   = decision.actions ?? { updateDB: false, fields: {} };
+    const actions = decision.actions ?? { updateDB: false, fields: {} };
 
     console.log("🤖 AI Decision:", {
       nextState,
-      updateDB:    actions.updateDB,
-      fields:      actions.fields,
-      saveUpload:  actions.saveUpload ? "YES" : "NO",
+      updateDB: actions.updateDB,
+      fields: actions.fields,
+      saveUpload: actions.saveUpload ? "YES" : "NO",
       cacheUpdate: actions.cacheUpdate ? "YES" : "NO",
     });
 
@@ -745,10 +915,11 @@ export const handleIncomingMessage = async (req, res) => {
         uploadResult = await saveUploadRow({
           participant_id: pid,
           participant_relatives_name:
-            actions.saveUpload.participant_relatives_name ?? participant.full_name,
-          document_url:  uploadUrl,
+            actions.saveUpload.participant_relatives_name ??
+            participant.full_name,
+          document_url: uploadUrl,
           document_type: actions.saveUpload.document_type ?? "Document",
-          role:          actions.saveUpload.role ?? "Self",
+          role: actions.saveUpload.role ?? "Self",
         });
 
         console.log("✅ Upload saved to uploads table");
@@ -758,20 +929,22 @@ export const handleIncomingMessage = async (req, res) => {
           const docType = actions.saveUpload.document_type || "";
           let direction = null;
 
-          if (docType.toLowerCase().includes("arrival"))     direction = "arrival";
-          else if (docType.toLowerCase().includes("return")) direction = "return";
+          if (docType.toLowerCase().includes("arrival")) direction = "arrival";
+          else if (docType.toLowerCase().includes("return"))
+            direction = "return";
 
           if (direction && uploadResult && uploadResult[0]?.upload_id) {
             const personName =
-              actions.saveUpload.participant_relatives_name || participant.full_name;
+              actions.saveUpload.participant_relatives_name ||
+              participant.full_name;
 
             await saveTravelItinerary({
-              participant_id:             pid,
-              upload_id:                  uploadResult[0].upload_id,
-              event_id:                   eventId,
-              extractedData:              extractionResult.extractedData,
+              participant_id: pid,
+              upload_id: uploadResult[0].upload_id,
+              event_id: eventId,
+              extractedData: extractionResult.extractedData,
               direction,
-              document_type:              docType,
+              document_type: docType,
               participant_relatives_name: personName,
             });
           }
@@ -790,9 +963,9 @@ export const handleIncomingMessage = async (req, res) => {
         .maybeSingle();
 
       const fieldsToUpdate = {
-        call_status:  nextState,
+        call_status: nextState,
         last_updated: new Date().toISOString(),
-        event_id:     existingRow?.event_id || eventId,
+        event_id: existingRow?.event_id || eventId,
       };
 
       if (actions.updateDB && actions.fields) {
@@ -835,7 +1008,10 @@ export const handleIncomingMessage = async (req, res) => {
           .select();
 
         if (insertError)
-          console.error("❌ Error inserting conversation_results:", insertError);
+          console.error(
+            "❌ Error inserting conversation_results:",
+            insertError,
+          );
         else console.log("✅ Conversation results inserted:", insertData);
       }
     } catch (err) {
@@ -859,40 +1035,41 @@ export const handleIncomingMessage = async (req, res) => {
     // ── ✅ DEDUCT PRODUCTION CREDITS (only after successful send) ────────
     const creditResult = await deductProductionChatCredits(userId, {
       participant_id: pid,
-      event_id:       eventId,
-      phone:          from,
-      state:          nextState,
+      event_id: eventId,
+      phone: from,
+      state: nextState,
     });
 
     if (creditResult) {
       console.log(
         `[CREDITS] 💰 Result: -${creditResult.creditsDeducted} | ` +
-        `balance: ${creditResult.newBalance}` +
-        (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
+          `balance: ${creditResult.newBalance}` +
+          (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
       );
     }
 
     // ── Save messages to chat logs ───────────────────────────────────────
     const chat = await chatCtrl.ensureChat({
-      event_id:     eventId,
+      event_id: eventId,
       phone_number: from,
-      person_name:  displayName,
+      person_name: displayName,
     });
 
     await chatCtrl.saveMessage({
-      chat_id:     chat.chat_id,
+      chat_id: chat.chat_id,
       sender_type: "user",
-      message:     userText || (mediaUrl ? `[${incomingType.toUpperCase()}]` : "TEXT"),
+      message:
+        userText || (mediaUrl ? `[${incomingType.toUpperCase()}]` : "TEXT"),
       message_type: incomingType || "text",
-      media_path:  storedMediaPath,
+      media_path: storedMediaPath,
     });
 
     await chatCtrl.saveMessage({
-      chat_id:     chat.chat_id,
+      chat_id: chat.chat_id,
       sender_type: "ai",
-      message:     finalReply || "AI reply",
+      message: finalReply || "AI reply",
       message_type: "text",
-      media_path:  null,
+      media_path: null,
     });
 
     return res.sendStatus(200);
@@ -900,7 +1077,7 @@ export const handleIncomingMessage = async (req, res) => {
     console.error("❌ Handler Error:", err);
 
     try {
-      const message        = value?.messages?.[0];
+      const message = value?.messages?.[0];
       const businessNumber = process.env.WHATSAPP_BUSINESS_NUMBER;
 
       if (message.from === businessNumber) {
@@ -963,7 +1140,7 @@ export const startInitialMessage = async (req, res) => {
     for (const person of participants) {
       try {
         let phone = person.phone_number.toString().trim();
-        phone     = phone.replace(/\D/g, "");
+        phone = phone.replace(/\D/g, "");
         if (!phone.startsWith("91")) phone = "91" + phone;
 
         const name = person.full_name?.trim() || "Guest";
@@ -989,9 +1166,9 @@ export const startInitialMessage = async (req, res) => {
           const { data: newChat } = await supabase
             .from("chats")
             .insert({
-              event_id:     person.event_id,
+              event_id: person.event_id,
               phone_number: phone,
-              person_name:  name,
+              person_name: name,
               last_message: personalizedMessage,
             })
             .select("chat_id")
@@ -1001,9 +1178,9 @@ export const startInitialMessage = async (req, res) => {
 
         await supabase.from("messages").insert({
           chat_id,
-          sender_type:  "system",
+          sender_type: "system",
           message_type: "text",
-          message:      personalizedMessage,
+          message: personalizedMessage,
         });
 
         const { data: existingConvo } = await supabase
@@ -1015,18 +1192,18 @@ export const startInitialMessage = async (req, res) => {
         if (!existingConvo) {
           await supabase.from("conversation_results").insert({
             participant_id: person.participant_id,
-            event_id:       person.event_id,
-            call_status:    "awaiting_rsvp",
-            last_updated:   new Date().toISOString(),
+            event_id: person.event_id,
+            call_status: "awaiting_rsvp",
+            last_updated: new Date().toISOString(),
           });
         }
 
         convoCache.set(person.participant_id, {
           call_status: "awaiting_rsvp",
-          currentDoc:  { name: null, role: null, type: null },
+          currentDoc: { name: null, role: null, type: null },
           pendingDocs: [],
           lastUpdated: new Date(),
-          event_id:    person.event_id,
+          event_id: person.event_id,
         });
       } catch (err) {
         console.error(
@@ -1098,8 +1275,8 @@ export const sendBatchInitialMessage = async (req, res) => {
     }
 
     const templateName = "invite_rsvp";
-    let successCount   = 0;
-    let failCount      = 0;
+    let successCount = 0;
+    let failCount = 0;
 
     for (const p of targetParticipants) {
       try {
@@ -1107,12 +1284,16 @@ export const sendBatchInitialMessage = async (req, res) => {
         if (!phone) throw new Error("Missing phone number");
         if (!phone.startsWith("91")) phone = "91" + phone;
 
-        const name               = p.full_name?.trim() || "Guest";
+        const name = p.full_name?.trim() || "Guest";
         const templateComponents = [
           { type: "body", parameters: [{ type: "text", text: name }] },
         ];
 
-        await sendInitialTemplateMessage(phone, templateName, templateComponents);
+        await sendInitialTemplateMessage(
+          phone,
+          templateName,
+          templateComponents,
+        );
 
         const personalizedMessage = `Hello ${name}, please confirm your RSVP.`;
 
@@ -1134,21 +1315,21 @@ export const sendBatchInitialMessage = async (req, res) => {
           await supabase
             .from("chats")
             .update({
-              last_message:    personalizedMessage,
+              last_message: personalizedMessage,
               last_message_at: new Date().toISOString(),
-              updated_at:      new Date().toISOString(),
+              updated_at: new Date().toISOString(),
             })
             .eq("chat_id", chat_id);
         } else {
           const { data: newChat, error: insertError } = await supabase
             .from("chats")
             .insert({
-              event_id:        p.event_id,
-              phone_number:    phone,
-              person_name:     name,
-              last_message:    personalizedMessage,
+              event_id: p.event_id,
+              phone_number: phone,
+              person_name: name,
+              last_message: personalizedMessage,
               last_message_at: new Date().toISOString(),
-              mode:            "AI",
+              mode: "AI",
             })
             .select("chat_id")
             .single();
@@ -1162,9 +1343,9 @@ export const sendBatchInitialMessage = async (req, res) => {
 
         await supabase.from("messages").insert({
           chat_id,
-          sender_type:  "system",
+          sender_type: "system",
           message_type: "text",
-          message:      personalizedMessage,
+          message: personalizedMessage,
         });
 
         const { data: existingConvo } = await supabase
@@ -1176,18 +1357,18 @@ export const sendBatchInitialMessage = async (req, res) => {
         if (!existingConvo) {
           await supabase.from("conversation_results").insert({
             participant_id: p.participant_id,
-            event_id:       p.event_id,
-            call_status:    "awaiting_rsvp",
-            last_updated:   new Date().toISOString(),
+            event_id: p.event_id,
+            call_status: "awaiting_rsvp",
+            last_updated: new Date().toISOString(),
           });
         }
 
         convoCache.set(p.participant_id, {
           call_status: "awaiting_rsvp",
-          currentDoc:  { name: null, role: null, type: null },
+          currentDoc: { name: null, role: null, type: null },
           pendingDocs: [],
           lastUpdated: new Date(),
-          event_id:    p.event_id,
+          event_id: p.event_id,
         });
 
         successCount++;
@@ -1203,15 +1384,225 @@ export const sendBatchInitialMessage = async (req, res) => {
     console.log(`📊 Batch Results: ${successCount} sent, ${failCount} failed`);
 
     return res.json({
-      message:               "✅ Batch RSVP messages sent",
-      template_used:         "invite_rsvp",
-      total_targeted:        targetParticipants.length,
-      sent_count:            successCount,
-      failed_count:          failCount,
+      message: "✅ Batch RSVP messages sent",
+      template_used: "invite_rsvp",
+      total_targeted: targetParticipants.length,
+      sent_count: successCount,
+      failed_count: failCount,
       filtered_by_null_rsvp: !!filter_null_rsvp,
     });
   } catch (err) {
     console.error("❌ sendBatchInitialMessage error:", err);
     return res.status(500).json({ error: "Failed to send batch messages" });
+  }
+};
+
+export const handleSamvaadikWebhook = async (req, res) => {
+  // Always respond 200 immediately so Samvaadik doesn't retry
+  res.sendStatus(200);
+
+  console.log("🔹 SAMVAADIK WEBHOOK:", JSON.stringify(req.body, null, 2));
+
+  const { event, from, message, message_type, account_id } = req.body;
+
+  if (event !== "message.received") return;
+  if (!from || !message) {
+    console.warn("⚠️ Missing from or message");
+    return;
+  }
+
+  try {
+    const normalised = String(from).replace(/^\+/, "");
+    const userText = String(message).trim();
+    const incomingType = message_type || "text";
+
+    console.log("📩 Samvaadik msg:", {
+      from: normalised,
+      preview: userText.slice(0, 80),
+    });
+
+    // ── 1. Get ALL non-closed sessions for this phone ─────────────────────
+    //    ordered newest-first so [0] is always the most-relevant session
+    const { data: allSessions } = await supabase
+      .from("whatsapp_ai_sessions")
+      .select("*")
+      .eq("phone_number", normalised)
+      .neq("status", "closed") // 'closed' = admin manually ended
+      .order("last_message_at", { ascending: false });
+
+    if (!allSessions?.length) {
+      console.warn("⚠️ No session found for:", normalised);
+      return; // no session at all — nothing to do
+    }
+
+    // ── 2. Determine routing ──────────────────────────────────────────────
+    //    Prefer 'active' (still collecting RSVP) over 'completed'
+    const activeSession = allSessions.find((s) => s.status === "active");
+    const completedSession = allSessions.find((s) => s.status === "completed");
+    const primarySession = activeSession || completedSession;
+
+    if (!primarySession) {
+      console.warn("⚠️ No actionable session for:", normalised);
+      return;
+    }
+
+    // ── 3. Load participant ───────────────────────────────────────────────
+    const { data: participant } = await supabase
+      .from("participants")
+      .select("*")
+      .eq("participant_id", primarySession.participant_id)
+      .maybeSingle();
+
+    if (!participant) {
+      console.warn("⚠️ Participant not found:", primarySession.participant_id);
+      return;
+    }
+
+    const eventId = primarySession.event_id;
+    const displayName = participant.full_name?.trim() || "Guest";
+    const pid = participant.participant_id;
+
+    // ── 4. Load full event ────────────────────────────────────────────────
+    const { data: fullEvent } = await supabase
+      .from("events")
+      .select(
+        "event_id, event_name, knowledge_base_id, field_mode, agent_id, user_id",
+      )
+      .eq("event_id", eventId)
+      .single();
+
+    if (!fullEvent) {
+      console.warn("⚠️ Event not found:", eventId);
+      return;
+    }
+
+    if (fullEvent.field_mode !== "smart_fields") {
+      console.warn("⚠️ Event is not smart_fields — skipping:", eventId);
+      return;
+    }
+
+    const userId = fullEvent.user_id;
+
+    // ── 5. Route to the right engine ──────────────────────────────────────
+    let agentReply;
+
+    if (activeSession) {
+      // ── 5a. RSVP collection (session still active) ────────────────────
+      console.log(
+        `[samvaadikWebhook] 🤖 RSVP mode — session ${activeSession.session_id}`,
+      );
+
+      try {
+        agentReply = await agentChatEngine({
+          phoneNumber: normalised,
+          userMessage: userText,
+          eventId,
+          participantId: pid,
+          guestName: displayName,
+          event: fullEvent,
+        });
+      } catch (err) {
+        console.error("[samvaadikWebhook] agentChatEngine error:", err.message);
+        agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+      }
+    } else {
+      // ── 5b. Post-RSVP general chat (session completed) ────────────────
+      console.log(
+        `[samvaadikWebhook] 💬 General chat mode — session ${completedSession.session_id}`,
+      );
+
+      try {
+        agentReply = await generalChatEngine({
+          phoneNumber: normalised,
+          userMessage: userText,
+          primarySession: completedSession,
+          allSessions, // pass all so AI has multi-event context
+          event: fullEvent,
+        });
+      } catch (err) {
+        console.error(
+          "[samvaadikWebhook] generalChatEngine error:",
+          err.message,
+        );
+        agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+      }
+    }
+
+    if (!agentReply) {
+      console.warn("[samvaadikWebhook] No reply generated");
+      return;
+    }
+
+    console.log("[samvaadikWebhook] 🤖 Reply:", agentReply.slice(0, 100));
+
+    // ── 6. Send reply via Samvaadik ───────────────────────────────────────
+    const { data: conn } = await supabase
+      .from("samvaadik_connections")
+      .select("api_key, status")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (!conn?.api_key || conn.status !== "active") {
+      console.error(
+        "[samvaadikWebhook] No active Samvaadik connection for:",
+        userId,
+      );
+      return;
+    }
+
+    const axiosLib = (await import("axios")).default;
+    await axiosLib.post(
+      `${process.env.SAMVAADIK_BASE_URL}/messages/text`,
+      { phone: `+${normalised}`, message: agentReply },
+      {
+        headers: {
+          "X-API-Key": conn.api_key,
+          "Content-Type": "application/json",
+          "x-skip-window-check": "true",
+        },
+        timeout: 10000,
+      },
+    );
+
+    console.log("[samvaadikWebhook] ✅ Reply sent to", normalised);
+
+    // ── 7. Deduct credits ─────────────────────────────────────────────────
+    await deductProductionChatCredits(userId, {
+      participant_id: pid,
+      event_id: eventId,
+      phone: normalised,
+      state: activeSession ? "smart_fields_rsvp" : "smart_fields_general",
+    });
+
+    // ── 8. Save to chat logs ──────────────────────────────────────────────
+    try {
+      const chat = await chatCtrl.ensureChat({
+        event_id: eventId,
+        phone_number: normalised,
+        person_name: displayName,
+        user_id: userId,
+      });
+      await chatCtrl.saveMessage({
+        chat_id: chat.chat_id,
+        sender_type: "user",
+        message: userText,
+        message_type: incomingType,
+        media_path: null,
+      });
+      await chatCtrl.saveMessage({
+        chat_id: chat.chat_id,
+        sender_type: "ai",
+        message: agentReply,
+        message_type: "text",
+        media_path: null,
+      });
+    } catch (chatErr) {
+      console.warn(
+        "[samvaadikWebhook] Chat log error (non-blocking):",
+        chatErr.message,
+      );
+    }
+  } catch (err) {
+    console.error("[samvaadikWebhook] Fatal error:", err.message);
   }
 };

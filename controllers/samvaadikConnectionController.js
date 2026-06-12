@@ -18,6 +18,7 @@ const SUTRAK_WEBHOOK_URL =
  * 1. Validate the API key against Samvaadik GET /v1/account
  * 2. Update the webhook URL on the key (PATCH /v1/me/webhook)
  * 3. Save connection to samvaadik_connections table
+ *
  */
 export const connectSamvaadik = async (req, res) => {
   try {
@@ -450,5 +451,44 @@ export const getSamvaadikTemplateMedia = async (req, res) => {
           '<text x="50%" y="65%" text-anchor="middle" fill="#3f3f46" font-size="11" font-family="system-ui">Preview unavailable</text>' +
           "</svg>",
       );
+  }
+};
+
+export const syncWebhooksForAllUsers = async (req, res) => {
+  try {
+    const webhookUrl = process.env.SUTRAK_WEBHOOK_URL;
+    if (!webhookUrl)
+      return res.status(500).json({ error: "SUTRAK_WEBHOOK_URL not set" });
+
+    const { data: connections } = await supabase
+      .from("samvaadik_connections")
+      .select("id, user_id, api_key")
+      .eq("status", "active");
+
+    if (!connections?.length) return res.json({ success: true, synced: 0 });
+
+    let synced = 0,
+      failed = 0;
+    for (const conn of connections) {
+      try {
+        await updateWebhookUrl(conn.api_key, webhookUrl);
+        await supabase
+          .from("samvaadik_connections")
+          .update({
+            webhook_set: true,
+            last_verified_at: new Date().toISOString(),
+          })
+          .eq("id", conn.id);
+        synced++;
+        console.log(`[syncWebhooks] ✅ user ${conn.user_id}`);
+      } catch (err) {
+        failed++;
+        console.error(`[syncWebhooks] ❌ user ${conn.user_id}:`, err.message);
+      }
+    }
+
+    return res.json({ success: true, webhook_url: webhookUrl, synced, failed });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 };

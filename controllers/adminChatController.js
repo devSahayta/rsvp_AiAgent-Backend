@@ -1,3 +1,5 @@
+// controllers/adminChatController.js
+
 import { supabase } from "../config/supabase.js";
 import { sendWhatsAppTextMessage } from "../utils/whatsappClient.js";
 

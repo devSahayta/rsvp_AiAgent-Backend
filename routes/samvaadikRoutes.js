@@ -13,6 +13,7 @@ import {
   proxyTemplateMedia,
   getSamvaadikTemplateMedia,
   getSamvaadikTemplate,
+  syncWebhooksForAllUsers,
 } from "../controllers/samvaadikConnectionController.js";
 
 const router = express.Router();
@@ -40,5 +41,7 @@ router.get("/templates/:wt_id", getSamvaadikTemplateInfo);
 
 // GET    /api/samvaadik/templates    → fetch approved templates from Samvaadik
 router.get("/templates", getSamvaadikTemplates);
+
+router.post("/sync-webhooks", syncWebhooksForAllUsers);
 
 export default router;

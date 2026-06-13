@@ -1606,3 +1606,173 @@ export const handleSamvaadikWebhook = async (req, res) => {
     console.error("[samvaadikWebhook] Fatal error:", err.message);
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADD to controllers/whatsappController.js
+//
+// New export: sendSamvaadikBatch
+// Route:      POST /whatsapp/samvaadik-batch
+//
+// What it does:
+//   1. Gets all participants for the event
+//   2. Sends the chosen Samvaadik template to each
+//   3. Creates / resets whatsapp_ai_sessions so the chatbot responds automatically
+//   4. Creates chat rows for dashboard visibility
+//   5. Returns per-participant results
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { createSession } from "../utils/sessionManager.js";
+
+export const sendSamvaadikBatch = async (req, res) => {
+  try {
+    const { event_id, template_name, language_code = "en" } = req.body;
+
+    if (!event_id || !template_name) {
+      return res
+        .status(400)
+        .json({ error: "event_id and template_name are required" });
+    }
+
+    // ── Load event ────────────────────────────────────────────────────────
+    const { data: event } = await supabase
+      .from("events")
+      .select("event_id, event_name, user_id, field_mode, agent_id")
+      .eq("event_id", event_id)
+      .single();
+
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    // ── Load Samvaadik connection for this organiser ───────────────────────
+    const { data: conn } = await supabase
+      .from("samvaadik_connections")
+      .select("api_key, status")
+      .eq("user_id", event.user_id)
+      .maybeSingle();
+
+    if (!conn?.api_key || conn.status !== "active") {
+      return res.status(400).json({
+        error:
+          "No active Samvaadik connection. Please connect Samvaadik first.",
+      });
+    }
+
+    // ── Load participants ─────────────────────────────────────────────────
+    const { data: participants } = await supabase
+      .from("participants")
+      .select("participant_id, full_name, phone_number")
+      .eq("event_id", event_id);
+
+    if (!participants?.length) {
+      return res
+        .status(404)
+        .json({ error: "No participants found for this event" });
+    }
+
+    const results = { sent: 0, failed: 0, errors: [] };
+
+    for (const participant of participants) {
+      try {
+        const phone = String(participant.phone_number).replace(/\D/g, "");
+        const normalised = phone.startsWith("+")
+          ? phone.replace("+", "")
+          : phone;
+        const displayPhone = `+${normalised}`;
+        const name = participant.full_name?.trim() || "Guest";
+
+        // ── 1. Send template via Samvaadik ──────────────────────────────
+        await axios.post(
+          `${process.env.SAMVAADIK_BASE_URL}/messages/template`,
+          {
+            phone: displayPhone,
+            template_name,
+            language_code,
+            components: [
+              {
+                type: "body",
+                parameters: [{ type: "text", text: name }],
+              },
+            ],
+          },
+          {
+            headers: {
+              "X-API-Key": conn.api_key,
+              "Content-Type": "application/json",
+            },
+            timeout: 10000,
+          },
+        );
+
+        // ── 2. Create WhatsApp AI session (this is what makes the bot respond) ──
+        // createSession skips if already completed (won't reset done RSVPs)
+        await createSession({
+          event_id,
+          participant_id: participant.participant_id,
+          phone_number: normalised,
+          triggered_by: "batch_template",
+        });
+
+        // ── 3. Ensure chat row exists for dashboard ────────────────────────
+        await chatCtrl.ensureChat({
+          event_id,
+          phone_number: normalised,
+          person_name: name,
+          user_id: event.user_id,
+        });
+
+        // ── 4. Save the outbound template message ──────────────────────────
+        const chat = await chatCtrl.ensureChat({
+          event_id,
+          phone_number: normalised,
+          person_name: name,
+          user_id: event.user_id,
+        });
+
+        await chatCtrl.saveMessage({
+          chat_id: chat.chat_id,
+          sender_type: "ai",
+          message: `[Template: ${template_name}] Sent to ${name}`,
+          message_type: "template",
+          media_path: null,
+        });
+
+        results.sent++;
+        console.log(
+          `[sendSamvaadikBatch] ✅ Sent to ${name} (${displayPhone})`,
+        );
+      } catch (err) {
+        results.failed++;
+        const errMsg = err.response?.data?.message || err.message;
+        results.errors.push(
+          `${participant.full_name} (${participant.phone_number}): ${errMsg}`,
+        );
+        console.error(
+          `[sendSamvaadikBatch] ❌ Failed for ${participant.full_name}:`,
+          errMsg,
+        );
+      }
+    }
+
+    console.log(
+      `[sendSamvaadikBatch] Done: ${results.sent} sent, ${results.failed} failed`,
+    );
+
+    return res.json({
+      success: true,
+      event_id,
+      template: template_name,
+      total: participants.length,
+      ...results,
+      message: `${results.sent}/${participants.length} messages sent. Chatbot is now active for replies.`,
+    });
+  } catch (err) {
+    console.error("[sendSamvaadikBatch] Error:", err.message);
+    return res.status(500).json({ error: "Batch send failed: " + err.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Add to routes/whatsappRoutes.js:
+//
+//   import { ..., sendSamvaadikBatch } from "../controllers/whatsappController.js";
+//   router.post("/whatsapp/samvaadik-batch", sendSamvaadikBatch);
+// ─────────────────────────────────────────────────────────────────────────────

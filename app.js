@@ -22,6 +22,7 @@ import flightTrackingRoutes from "./routes/flightRoutes.js";
 import agentSystemRoutes from "./routes/agentSystemRoutes.js";
 import { startVoiceTestSyncCron } from "./crons/voiceTestSyncCron.js";
 import { startProductionBatchSyncCron } from "./crons/productionBatchSyncCron.js";
+import assistantRoutes from "./routes/assistantRoutes.js";
 
 import samvaadikRoutes from "./routes/samvaadikRoutes.js";
 dotenv.config();
@@ -79,6 +80,8 @@ app.use("/api/agent-system", agentSystemRoutes);
 
 // add after other routes:
 app.use("/api/samvaadik", samvaadikRoutes);
+
+app.use("/api/assistant", assistantRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
 

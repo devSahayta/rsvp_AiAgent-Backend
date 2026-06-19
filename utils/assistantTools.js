@@ -6,25 +6,48 @@
 const ASSISTANT_TOOLS = [
   // ── Events ──────────────────────────────────────────────────────────────
   {
-    name: "create_event",
+    name: "start_create_event",
     description:
-      "Create a new event in Sutrak. Use when the user wants to create, add, or set up an event. Ask for name and date if not provided.",
+      "Start the guided event creation flow. Use when the user wants to create, add, or set up a new event. This initiates the step-by-step wizard to collect event name, date, agent assignment, and participant CSV.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "finalize_create_event",
+    description:
+      "Create the event once the user has confirmed all details. Only call this AFTER the user approves the summary. Handles event creation + participant upload in one call.",
     input_schema: {
       type: "object",
       properties: {
-        event_name: {
-          type: "string",
-          description: "The name or title of the event",
-        },
+        event_name: { type: "string", description: "Name of the event" },
         event_date: {
           type: "string",
           description:
-            "The date/time of the event e.g. '2026-07-20' or 'July 20'",
+            "Date of the event e.g. '2026-08-15' or 'August 15 2026'",
         },
         event_type: {
           type: "string",
           description:
             "Type of event e.g. wedding, conference, birthday (optional)",
+        },
+        agent_id: {
+          type: "string",
+          description: "UUID of the agent to assign to this event (optional)",
+        },
+        agent_name: {
+          type: "string",
+          description: "Name of the selected agent (for display only)",
+        },
+        csv_attached: {
+          type: "boolean",
+          description: "Whether the user attached a CSV file for participants",
+        },
+        csv_file_name: {
+          type: "string",
+          description: "The CSV filename attached by the user (if any)",
         },
       },
       required: ["event_name", "event_date"],
@@ -149,6 +172,122 @@ const ASSISTANT_TOOLS = [
         },
       },
       required: ["template_name"],
+    },
+  },
+
+  // ── Agent creation — multi-step guided flow ──────────────────────────────────
+  {
+    name: "start_create_agent",
+    description:
+      "Start the guided agent creation flow. Use when the user wants to create a new agent, build an agent, or set up a new AI agent. This initiates the step-by-step wizard.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "get_agent_templates",
+    description:
+      "Fetch available agent templates for classic mode. Use when the user has chosen classic mode and needs to pick a template.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "get_knowledge_bases",
+    description:
+      "Fetch the user's existing knowledge bases so they can reuse one instead of creating new. Use during the knowledge base step of agent creation.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "finalize_create_agent",
+    description:
+      "Create the agent once the user has confirmed all details in the summary. Only call this after the user explicitly approves the summary. This calls the actual API to create the agent.",
+    input_schema: {
+      type: "object",
+      properties: {
+        agent_name: { type: "string", description: "Name of the agent" },
+        agent_description: {
+          type: "string",
+          description: "Description of the agent",
+        },
+        field_mode: {
+          type: "string",
+          enum: ["classic", "smart_fields"],
+          description: "Agent mode",
+        },
+        template_id: {
+          type: "string",
+          description: "Template UUID for classic mode",
+        },
+        event_title: {
+          type: "string",
+          description:
+            "Event title for smart_fields mode (e.g. Wedding of X and Y)",
+        },
+        first_message: {
+          type: "string",
+          description:
+            "Opening message the agent sends. Optional for smart_fields mode.",
+        },
+        kb_name: { type: "string", description: "Name for the knowledge base" },
+        kb_content: {
+          type: "string",
+          description: "Content/text for the knowledge base",
+        },
+        kb_id: {
+          type: "string",
+          description: "Existing knowledge base UUID if reusing one",
+        },
+        smart_fields: {
+          type: "array",
+          description: "Array of smart fields for smart_fields mode",
+          items: {
+            type: "object",
+            properties: {
+              field_label: {
+                type: "string",
+                description: "Human readable label e.g. 'RSVP Status'",
+              },
+              field_key: {
+                type: "string",
+                description:
+                  "Snake_case key auto-derived from label e.g. 'rsvp_status'",
+              },
+              field_type: {
+                type: "string",
+                enum: ["yes_no", "number", "text", "choice"],
+                description: "Type of the field",
+              },
+              ai_question: {
+                type: "string",
+                description: "The exact question the AI will ask the guest",
+              },
+              is_required: {
+                type: "boolean",
+                description: "Whether this field is mandatory",
+              },
+              options: {
+                type: "array",
+                items: { type: "string" },
+                description: "Options for choice type fields",
+              },
+              display_order: {
+                type: "number",
+                description: "Order in which the field is asked (0-indexed)",
+              },
+            },
+          },
+        },
+      },
+      required: ["agent_name", "field_mode", "kb_name", "kb_content"],
     },
   },
 

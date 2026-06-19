@@ -23,40 +23,128 @@ export async function executeToolCall(toolName, toolInput, userId) {
   switch (toolName) {
     // ── Events ──────────────────────────────────────────────────────────────
 
-    case "create_event": {
-      const { event_name, event_date, event_type } = toolInput;
+    case "start_create_event": {
+      // Fetch user's agents so Claude can show them for selection
+      const { data: agents } = await supabase
+        .from("agents")
+        .select("agent_id, agent_name, field_mode, status")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(20);
 
-      // Parse date — accept natural language or ISO
+      return {
+        success: true,
+        action_type: "create_event_wizard",
+        agents: (agents || []).map((a) => ({
+          id: a.agent_id,
+          name: a.agent_name,
+          mode: a.field_mode,
+          status: a.status,
+        })),
+        steps: [
+          {
+            step: 1,
+            title: "Event Name",
+            description: "What's the event called?",
+          },
+          {
+            step: 2,
+            title: "Event Date",
+            description: "When is it happening?",
+          },
+          {
+            step: 3,
+            title: "Event Type",
+            description: "Category (wedding, conference, etc.)",
+          },
+          {
+            step: 4,
+            title: "Assign Agent",
+            description: "Pick an agent to handle calls/WhatsApp",
+          },
+          {
+            step: 5,
+            title: "Upload CSV",
+            description: "Attach participant list (CSV/Excel)",
+          },
+          {
+            step: 6,
+            title: "Review & Create",
+            description: "Confirm and create the event",
+          },
+        ],
+      };
+    }
+
+    case "finalize_create_event": {
+      const {
+        event_name,
+        event_date,
+        event_type,
+        agent_id,
+        agent_name,
+        csv_attached,
+        csv_file_name,
+      } = toolInput;
+
+      // Parse date robustly
       const parsedDate = new Date(event_date);
       if (isNaN(parsedDate.getTime())) {
         return {
           success: false,
-          message: `I couldn't understand the date "${event_date}". Try something like "July 20, 2026" or "2026-07-20".`,
+          message: `I couldn't understand the date "${event_date}". Please try a format like "August 15, 2026" or "2026-08-15".`,
         };
       }
 
-      const { data, error } = await supabase
-        .from("events")
-        .insert([
-          {
-            user_id: userId,
-            event_name,
-            event_date: parsedDate.toISOString(),
-            event_type: event_type || null,
-            status: "Upcoming",
-          },
-        ])
-        .select("event_id, event_name, event_date, status")
-        .single();
+      // Build the payload exactly as the frontend createEvent page sends it.
+      // We call the existing POST /api/events endpoint so createEventWithCsv runs —
+      // this handles CSV parsing, participant insert, Supabase Storage upload,
+      // elevenlabs_kb_id sync, and everything else the manual UI does.
+      // NOTE: The CSV file bytes live in the frontend (attachedFiles state).
+      // The assistant cannot hold file bytes — so we create the event here (no CSV),
+      // and the frontend's uploadCsvAfterEvent() sends the CSV in a second call.
 
-      if (error) throw new Error(`Failed to create event: ${error.message}`);
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+
+      const payload = {
+        user_id: userId,
+        event_name,
+        event_date: parsedDate.toISOString(),
+        event_type: event_type || null,
+        agent_id: agent_id || null,
+      };
+
+      // Call the real createEvent endpoint (no CSV at this stage — frontend handles that)
+      const res = await fetch(`${backendUrl}/api/events/assistant-create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await res.json();
+      if (!data.success) {
+        throw new Error(data.error || "Failed to create event");
+      }
+
+      const event = data.data || data.event || data;
 
       return {
         success: true,
-        event_id: data.event_id,
-        event_name: data.event_name,
-        event_date: data.event_date,
-        message: `Event "${data.event_name}" created successfully.`,
+        action_type: "event_created",
+        event_id: event.event_id,
+        event_name: event.event_name,
+        event_date: new Date(event.event_date).toLocaleDateString("en-IN", {
+          day: "numeric",
+          month: "long",
+          year: "numeric",
+        }),
+        agent_name: agent_name || null,
+        csv_attached: csv_attached || false,
+        csv_file_name: csv_file_name || null,
+        // frontend will upload CSV to POST /api/events/:eventId/upload-csv
+        needs_csv_upload: csv_attached === true,
+        message: `Event "${event_name}" created successfully!`,
       };
     }
 
@@ -425,6 +513,190 @@ export async function executeToolCall(toolName, toolInput, userId) {
 
     // ── create_template — uncomment when colleague's API is ready ──
     // case "create_template": { ... }
+
+    // ── Agent creation tools ──────────────────────────────────────────────────
+
+    case "start_create_agent": {
+      // Just returns the step structure so Claude can guide the conversation
+      return {
+        success: true,
+        action_type: "create_agent_wizard",
+        steps: [
+          {
+            step: 1,
+            title: "Agent Mode",
+            description: "Choose Classic or Smart Fields mode",
+          },
+          {
+            step: 2,
+            title: "Basic Info",
+            description: "Agent name and description",
+          },
+          {
+            step: 3,
+            title: "Smart Fields / Template",
+            description:
+              "Define what data to collect (smart) or pick a template (classic)",
+          },
+          {
+            step: 4,
+            title: "Knowledge Base",
+            description: "Add event knowledge for the agent",
+          },
+          {
+            step: 5,
+            title: "Review & Create",
+            description: "Confirm everything and create the agent",
+          },
+        ],
+        message: "wizard_started",
+      };
+    }
+
+    case "get_agent_templates": {
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+      const response = await fetch(`${backendUrl}/api/agent-system/templates`);
+      const data = await response.json();
+      if (!data.success)
+        return { success: false, message: "Failed to fetch templates" };
+      return {
+        success: true,
+        templates: (data.data || []).map((t) => ({
+          template_id: t.template_id,
+          name: t.name,
+          category: t.category,
+          description: t.description,
+        })),
+      };
+    }
+
+    case "get_knowledge_bases": {
+      const { data: kbs, error } = await supabase
+        .from("knowledge_bases")
+        .select("id, name, created_at")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(10);
+
+      if (error)
+        throw new Error(`Failed to fetch knowledge bases: ${error.message}`);
+      return {
+        success: true,
+        count: kbs.length,
+        knowledge_bases: kbs.map((k) => ({ id: k.id, name: k.name })),
+      };
+    }
+
+    case "finalize_create_agent": {
+      const {
+        agent_name,
+        agent_description = "",
+        field_mode,
+        template_id,
+        event_title,
+        first_message,
+        kb_name,
+        kb_content,
+        kb_id,
+        smart_fields = [],
+      } = toolInput;
+
+      const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
+
+      // Step A: Create or reuse knowledge base
+      let knowledgeBaseId = kb_id || null;
+
+      if (!knowledgeBaseId) {
+        if (!kb_name || !kb_content) {
+          return {
+            success: false,
+            message: "Knowledge base name and content are required.",
+          };
+        }
+
+        const kbRes = await fetch(`${backendUrl}/api/knowledge-bases`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            user_id: userId,
+            name: kb_name,
+            content: kb_content,
+          }),
+        });
+        const kbData = await kbRes.json();
+        if (!kbData.success) {
+          return {
+            success: false,
+            message: `Failed to create knowledge base: ${kbData.error}`,
+          };
+        }
+        knowledgeBaseId = kbData.data.id;
+      }
+
+      // Step B: Create agent
+      let agentPayload = {
+        user_id: userId,
+        agent_name,
+        agent_description,
+        knowledge_base_id: knowledgeBaseId,
+        field_mode,
+      };
+
+      if (field_mode === "classic") {
+        if (!template_id)
+          return {
+            success: false,
+            message: "Template is required for classic mode.",
+          };
+        agentPayload.template_id = template_id;
+        agentPayload.event_title = event_title || null;
+      } else {
+        // smart_fields mode
+        agentPayload.event_title = event_title || "";
+        agentPayload.first_message =
+          first_message || "Hey! How can I help you today?";
+        // Normalize field shape to exactly what the DB + ElevenLabs agent expects.
+        // Claude may pass 'required' but DB column is 'is_required'.
+        // Ensure all keys are present and correctly named.
+        const cleanFields = (smart_fields || []).map((f, i) => ({
+          field_label: f.field_label || f.label || "",
+          field_key: (f.field_key || f.field_label || f.label || "")
+            .toLowerCase()
+            .trim()
+            .replace(/\s+/g, "_")
+            .replace(/[^a-z0-9_]/g, ""),
+          field_type: f.field_type || "text",
+          ai_question: f.ai_question || f.question || "",
+          is_required: f.is_required ?? f.required ?? false, // normalize required → is_required
+          options: Array.isArray(f.options) ? f.options : [],
+          display_order: i,
+        }));
+        agentPayload.smart_fields = cleanFields;
+      }
+
+      const agentRes = await fetch(`${backendUrl}/api/agent-system/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(agentPayload),
+      });
+      const agentData = await agentRes.json();
+
+      if (!agentData.success) {
+        return {
+          success: false,
+          message: `Failed to create agent: ${agentData.error}`,
+        };
+      }
+
+      return {
+        success: true,
+        action_type: "agent_created",
+        agent_id: agentData.data?.agent_id || agentData.data?.id,
+        agent_name,
+        field_mode,
+        message: `Agent "${agent_name}" created successfully!`,
+      };
+    }
 
     default:
       return { success: false, message: `Unknown tool: ${toolName}` };

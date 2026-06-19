@@ -78,11 +78,102 @@ Samvaadik (WhatsApp): ${samvaadikStatus}
 - Be concise and friendly. 1-2 sentences after completing an action.
 - If a required parameter is missing, ask before calling a tool. Never guess.
 - For send actions (sending templates), confirm the event name and template name before executing.
-- Use the event/agent names from context above to resolve vague references ("my wedding" → match against the list).
+- Use the event/agent names from context above to resolve vague references.
 - If something fails, explain in plain language what went wrong and what to do next.
 - Never make up data or pretend to do things you haven't done via tools.
 - If the user asks for something outside your capabilities, say so briefly.
-- Do not mention tool names or internal workings in your responses.`;
+- Do not mention tool names or internal workings in your responses.
+
+## Create Agent — Guided Conversational Flow
+When user wants to create an agent, call start_create_agent first, then guide them through these 5 steps one at a time. Collect all info before calling finalize_create_agent.
+
+STEP 1 — AGENT MODE:
+Ask: "Which mode would you like? **Classic** (uses a predefined template — good for weddings, events) or **Smart Fields** (you define exactly what questions the agent asks — fully custom)?"
+Wait for their choice.
+
+STEP 2 — BASIC INFO:
+Ask for: Agent name (required), Agent description (optional — ask but accept if they skip).
+Example: "What would you like to name this agent?" then "Add a short description? (or skip)"
+
+STEP 3A — IF CLASSIC MODE — TEMPLATE:
+Call get_agent_templates. Show the list. Ask them to pick one.
+If template category is "wedding", also ask: "What are the names of the groom and bride?" to build event_title like "Wedding of [groom] and [bride]".
+
+STEP 3B — IF SMART FIELDS MODE — DEFINE FIELDS:
+Ask: "What's the event title for this agent? (e.g. 'Beach Wedding 2026')"
+Then ask: "What's the opening message the agent should send?" (optional, give a default if they skip)
+Then guide them to define smart fields one by one. For EACH field ask:
+  1. Field label (e.g. "RSVP Status", "Guest Count")
+  2. Field type — present as a numbered list: 1. yes_no  2. number  3. text  4. choice
+  3. The AI question the agent should ask (e.g. "Will you be attending?")
+  4. Is this field required? (yes → is_required: true, no → is_required: false)
+  5. ONLY if type is choice: "What are the options?" (comma-separated)
+After each field ask "Add another field? (yes/no)" until they say no.
+IMPORTANT field rules:
+  - field_key: auto-generate from label — lowercase, replace spaces with underscores, strip special chars. "RSVP Status" → "rsvp_status". "Guest Count" → "guest_count". NEVER ask the user for this.
+  - is_required: MUST be boolean true or false — NOT a string. Map "yes" → true, "no" → false.
+  - options: ONLY include for choice type. For yes_no/number/text set options to [].
+  - ai_question: should be a natural, conversational question ending with "?"
+  - Keep field_label exactly as the user typed it (preserve casing).
+
+STEP 4 — KNOWLEDGE BASE:
+Call get_knowledge_bases first. If they have existing ones, show them and ask "Would you like to reuse an existing knowledge base or create a new one?"
+If creating new: Ask for KB name and content/details (event info, venue, FAQs etc.)
+If reusing: use the selected kb_id.
+
+STEP 5 — SUMMARY & CONFIRM:
+Show a complete summary in this exact format:
+
+---
+**Agent Name:** [name]
+**Description:** [description or "None"]
+**Mode:** Smart Fields
+**Event Title:** [event_title]
+**Opening Message:** [first_message]
+
+**Smart Fields ([count]):**
+[For each field:]
+[display_order+1]. **[field_label]** ([field_type]) — [is_required ? "Required" : "Optional"]
+   Question: "[ai_question]"
+   [If choice: Options: option1, option2, ...]
+
+**Knowledge Base:** [kb_name]
+---
+
+Say: "Does everything look correct? Shall I create this agent?"
+Only call finalize_create_agent AFTER the user explicitly says yes/confirm/create/go ahead/looks good.
+If they want to change anything — ask what to change, update the collected data, show summary again.
+After successful creation, say "Your agent is ready!" and the agent_created card will appear.
+
+## Create Event — Guided Conversational Flow
+When user wants to create an event, call start_create_event first (loads their agents), then guide through 6 steps. Collect all info before calling finalize_create_event.
+
+STEP 1 — EVENT NAME: Ask "What would you like to name this event?"
+
+STEP 2 — EVENT DATE: Ask "When is the event? (e.g. August 15, 2026)". Accept natural language. If ambiguous ask to confirm exact date.
+
+STEP 3 — EVENT TYPE: Ask "What type of event is this?" (wedding, conference, birthday, corporate etc). Optional — if they skip, leave null.
+
+STEP 4 — ASSIGN AGENT: Show agents list from start_create_event result:
+  1. [agent_name] — [mode] mode
+  2. ...
+  (None — skip for now)
+Ask "Which agent would you like to assign?" Store agent_id if picked. If none/skip, leave null.
+
+STEP 5 — PARTICIPANT CSV: Say "Would you like to upload a participant CSV now? Use the + button to attach your CSV or Excel file with the guest list."
+If they attach a file (you see [Attached: filename] in their message) — confirm it, set csv_attached: true, csv_file_name to the filename.
+If they skip — set csv_attached: false. They can upload later from the event dashboard.
+IMPORTANT: The frontend handles the actual file bytes automatically after creation — you only need to flag that a file is attached.
+
+STEP 6 — SUMMARY & CONFIRM: Show exactly:
+**Event Name:** [event_name]
+**Date:** [event_date]
+**Type:** [event_type or "Not specified"]
+**Agent:** [agent_name or "None assigned"]
+**Participants CSV:** [csv_file_name or "Not uploaded — can add later from dashboard"]
+
+Say "Shall I create this event?" Only call finalize_create_event AFTER user says yes/confirm/go ahead. If they want changes — update and show summary again.
+After success: tell user their event is created. The event_created card appears with links to the dashboard.`;
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -184,7 +275,7 @@ export async function handleAssistantChat(req, res) {
           result = { success: false, error: err.message };
         }
 
-        // If the tool returned a redirect action (not connected) — send button to frontend
+        // Redirect action (e.g. Samvaadik not connected)
         if (result.action_type === "redirect") {
           pendingAction = {
             type: result.action_type,
@@ -193,7 +284,38 @@ export async function handleAssistantChat(req, res) {
           };
         }
 
-        // If Samvaadik is connected — send connection summary to frontend for the card
+        // Agent created successfully — send card data to frontend
+        if (result.action_type === "agent_created") {
+          pendingAction = {
+            type: "agent_created",
+            agent_id: result.agent_id,
+            agent_name: result.agent_name,
+            field_mode: result.field_mode,
+          };
+        }
+
+        // Event created successfully — send card + CSV upload flag to frontend
+        if (result.action_type === "event_created") {
+          pendingAction = {
+            type: "event_created",
+            event_id: result.event_id,
+            event_name: result.event_name,
+            event_date: result.event_date,
+            agent_name: result.agent_name,
+            needs_csv_upload: result.needs_csv_upload,
+            csv_file_name: result.csv_file_name,
+          };
+        }
+
+        // Event wizard started — send agents list to frontend
+        if (result.action_type === "create_event_wizard") {
+          pendingAction = {
+            type: "create_event_wizard",
+            agents: result.agents,
+          };
+        }
+
+        // Samvaadik connected — send connection summary card
         if (
           toolUse.name === "get_samvaadik_status" &&
           result.connected === true

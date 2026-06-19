@@ -169,10 +169,11 @@ export const agentChatEngine = async ({
     });
 
     // ── 7. Call Claude API ─────────────────────────────────────────────────
+    // ── 7. Call Claude API ─────────────────────────────────────────────────
     const claudeResponse = await axios.post(
       ANTHROPIC_API_URL,
       {
-        model: "claude-sonnet-4-20250514",
+        model: process.env.CLAUDE_MODEL || "claude-haiku-4-5-20251001",
         max_tokens: 400,
         system: systemPrompt,
         messages: updatedHistory,

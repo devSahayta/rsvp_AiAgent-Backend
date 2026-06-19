@@ -1,69 +1,4 @@
-// // routes/eventRoutes.js
-
-// import { deleteEvent } from "../controllers/eventController.js";
-
-// import express from "express";
-// import multer from "multer";
-// import {
-//   createEventWithCsv,
-//   getEventsByUser,
-//   getEventById,
-//   getEventRSVPData,
-//   getEventDetails,
-//   getConversationStatus,
-// } from "../controllers/eventController.js";
-
-// import { authenticateUser } from "../middleware/authMiddleware.js";
-
-// import {
-//   triggerBatchCall,
-//   getRSVPDataByEvent,
-//   retryBatchCall,
-//   syncBatchStatuses,
-//   getBatchStatus,
-//   getDashboardData,
-// } from "../controllers/eventController.js";
-
-// const router = express.Router();
-// const upload = multer({
-//   storage: multer.memoryStorage(),
-//   limits: { fileSize: 10 * 1024 * 1024 },
-// }); // 10MB
-
-// // Create event + upload CSV + parse and insert participants
-// // multipart/form-data fields: user_id, event_name, event_date, dataset(file)
-// router.post("/", upload.single("dataset"), createEventWithCsv);
-
-// // Get all events for a user: /api/events?user_id=kp_xxx
-// router.get("/", getEventsByUser);
-
-// // Get single event by id
-// router.get("/:eventId", getEventById);
-
-// router.post("/:eventId/call-batch", triggerBatchCall);
-// // Get RSVP data for a single event
-// router.get("/:eventId/rsvps", getRSVPDataByEvent);
-// router.post("/:eventId/retry-batch", retryBatchCall);
-// router.post("/:eventId/sync-batch-status", syncBatchStatuses);
-
-// router.get("/:eventId/batch-status", getBatchStatus);
-
-// router.get("/:eventId/rsvp-data", getEventRSVPData);
-
-// router.get("/:eventId", authenticateUser, getEventDetails);
-// router.get(
-//   "/:eventId/conversation-status",
-//   authenticateUser,
-//   getConversationStatus
-// );
-// router.get("/:eventId/dashboard", getDashboardData);
-// router.delete("/:eventId", deleteEvent);
-
-// export default router;
-
-// --------------------------updated router ----------------------------------------------
-
-// routes/eventRoutes.js
+// routes/eventRoutes.js — Final version with assistant routes correctly ordered
 
 import express from "express";
 import multer from "multer";
@@ -97,66 +32,81 @@ import {
   getParticipantAudio,
 } from "../controllers/transcriptController.js";
 
+import {
+  assistantCreateEvent,
+  assistantUploadCsv,
+} from "../controllers/assistantEventController.js";
+
 const router = express.Router();
 
-// File upload config
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// ---------- ROUTES ----------
+// ─────────────────────────────────────────────────────────────────────────────
+// IMPORTANT: Static string routes MUST come before /:eventId param routes
+// otherwise Express matches "assistant-create" as an eventId param.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// Create event + CSV upload
-router.post("/", upload.single("dataset"), createEventWithCsv);
+// ── Assistant routes ──────────────────────────────────────────────────────────
+// Internal server-to-server call — no authenticateUser (user_id in body)
+router.post("/assistant-create", assistantCreateEvent);
 
-// Get user events
-router.get("/", getEventsByUser);
-
-// Smart fields endpoints (keep before /:eventId to avoid conflict)
+// ── Smart fields (static path — before /:eventId) ────────────────────────────
 router.post("/rsvp-responses", saveRsvpResponses);
 
-// Get single event by ID
+// ── Standard event CRUD ───────────────────────────────────────────────────────
+router.post("/", upload.single("dataset"), createEventWithCsv);
+router.get("/", getEventsByUser);
+
+// ── Param routes (:eventId) ───────────────────────────────────────────────────
 router.get("/:eventId", getEventById);
 
-// Batch operations
+// CSV upload from assistant frontend (frontend sends JWT → authenticateUser works)
+router.post(
+  "/:eventId/upload-csv",
+  authenticateUser,
+  upload.single("dataset"),
+  assistantUploadCsv,
+);
+
+// Batch
 router.post("/:eventId/call-batch", triggerBatchCall);
 router.post("/:eventId/retry-batch", retryBatchCall);
 router.post("/:eventId/sync-batch-status", syncBatchStatuses);
 router.get("/:eventId/batch-status", getBatchStatus);
 
-// RSVP data
+// RSVP
 router.get("/:eventId/rsvps", getRSVPDataByEvent);
 router.get("/:eventId/rsvp-data", getEventRSVPData);
 
 // Participants
 router.get("/:event_id/participants", getEventParticipants);
 
-// Transcript + Audio — per participant
+// Transcript + Audio
 router.get(
   "/:eventId/participants/:participantId/transcript",
   getParticipantTranscript,
 );
 router.get("/:eventId/participants/:participantId/audio", getParticipantAudio);
 
-// Event details (Protected)
+// Details / conversation
 router.get("/:eventId/details", authenticateUser, getEventDetails);
-
-// Conversation tracking
 router.get(
   "/:eventId/conversation-status",
   authenticateUser,
   getConversationStatus,
 );
 
-// Dashboard data
+// Dashboard
 router.get("/:eventId/dashboard", getDashboardData);
 
 // Smart fields
 router.get("/:eventId/smart-fields", getEventSmartFields);
 router.get("/:eventId/smart-rsvp-data", getSmartRsvpData);
 
-// DELETE event
+// Delete
 router.delete("/:eventId", deleteEvent);
 
 export default router;

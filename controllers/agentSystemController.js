@@ -194,9 +194,17 @@ export const createAgent = async (req, res) => {
           .json({ success: false, error: "Agent template not found" });
       }
 
+      const baseAgentId = process.env.ELEVENLABS_AGENT_ID;
+      if (!baseAgentId) {
+        return res.status(500).json({
+          success: false,
+          error: "ELEVENLABS_AGENT_ID is not configured in environment",
+        });
+      }
+
       //1) Duplicate base ElevenLabs agent
       const duplicatedAgent = await duplicateAgent({
-        agentId: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
+        agentId: baseAgentId,
         name: `${agent_name} Agent`,
       });
 

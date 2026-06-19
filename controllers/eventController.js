@@ -52,7 +52,7 @@ const findColumn = (headers, candidates) => {
 
 export const createEventWithCsv = async (req, res) => {
   const BASE_AGENTS = {
-    wedding: "agent_4101k6yqrwh1e2ysgw5fvtzbb0qw",
+    wedding: process.env.ELEVENLABS_AGENT_ID,
   };
 
   try {

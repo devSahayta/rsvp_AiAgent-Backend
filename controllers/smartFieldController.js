@@ -117,16 +117,24 @@ export const getSmartRsvpData = async (req, res) => {
 
 /**
  * POST /api/events/rsvp-responses
- * Called by ElevenLabs tool after the AI collects all smart field answers.
+ * Called by ElevenLabs tool after the AI collects each / all smart field answers.
  *
  * Body sent by ElevenLabs tool:
  * {
- *   event_id:        "uuid",
- *   participant_id:  "uuid",
+ *   event_id:        "uuid" | agent_id in test mode,
+ *   participant_id:  "uuid" | "test-participant" in test mode,
  *   response_data:   '{"rsvp_status":"yes","guest_count":2}' (JSON string),
  *   conversation_id: "conv_xxx",   // optional
  *   call_duration:   22            // optional, seconds
  * }
+ *
+ * TEST MODE: when participant_id is "test-participant" (or starts with "test-"),
+ * there is no real participant row in the DB, so any FK-bound insert/upsert would
+ * fail with a 500 — and ElevenLabs treats any non-2xx response as fatal and ends
+ * the call immediately. This is why test calls were dying after 3/4 questions.
+ * We short-circuit BEFORE touching event_rsvp_responses / event_call_logs and
+ * always return 200, while still logging the collected answer into
+ * agent_test_sessions (best-effort) so it's visible in Test History.
  */
 export const saveRsvpResponses = async (req, res) => {
   console.log("saveRsvpResponses called with body:", req.body);
@@ -159,6 +167,79 @@ export const saveRsvpResponses = async (req, res) => {
         error: "response_data is not valid JSON",
       });
     }
+
+    /* ──────────────────────────────────────────────────────────────────────
+       TEST MODE BYPASS
+       event_id here is actually the agent_id (test calls pass agent_id as
+       event_id — see agentTestController.js dynamic_variables).
+       participant_id is "test-participant" — no real row exists.
+       Skip all FK-bound DB writes. Always return 200.
+    ────────────────────────────────────────────────────────────────────── */
+    const isTestMode =
+      String(participant_id).trim() === "test-participant" ||
+      String(participant_id).startsWith("test-");
+
+    if (isTestMode) {
+      console.log(
+        `🧪 TEST MODE — rsvp-responses acknowledged without DB write:`,
+        parsedData,
+      );
+
+      // Best-effort: surface collected answers in agent_test_sessions so
+      // Test History shows them. event_id is the agent_id in test calls.
+      try {
+        const { data: session } = await supabase
+          .from("agent_test_sessions")
+          .select("test_session_id, test_data_collected")
+          .eq("agent_id", event_id)
+          .eq("test_type", "voice")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (session) {
+          const existing = session.test_data_collected || {};
+          const collected = {
+            ...(existing.collected_answers || {}),
+            ...parsedData,
+          };
+
+          await supabase
+            .from("agent_test_sessions")
+            .update({
+              test_data_collected: {
+                ...existing,
+                collected_answers: collected,
+              },
+              conversation_id: conversation_id || null,
+              duration_seconds: call_duration ?? null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("test_session_id", session.test_session_id);
+
+          console.log(`✅ Test session updated with:`, collected);
+        } else {
+          console.log(
+            `ℹ️ No matching test session found for agent ${event_id} — skipping log update`,
+          );
+        }
+      } catch (dbErr) {
+        console.warn(
+          `⚠️ Test session update failed (non-fatal):`,
+          dbErr.message,
+        );
+      }
+
+      // ALWAYS 200 — never let ElevenLabs see a failure in test mode
+      return res.json({
+        success: true,
+        test_mode: true,
+        saved_fields: Object.keys(parsedData),
+      });
+    }
+    /* ────────────────────────────────────────────────────────────────────── */
+
+    // ── PRODUCTION MODE — unchanged from your original logic ───────────────
 
     // Fetch smart field definitions to resolve field_id and field_label
     const { data: smartFields, error: sfError } = await supabase
@@ -234,6 +315,8 @@ export const saveRsvpResponses = async (req, res) => {
     res.json({ success: true, data });
   } catch (err) {
     console.error("saveRsvpResponses error:", err);
+    // NOTE: this still returns 500 for PRODUCTION errors (correct — you want
+    // to know about real failures). Only test mode is short-circuited above.
     res
       .status(500)
       .json({ success: false, error: "Failed to save RSVP responses" });

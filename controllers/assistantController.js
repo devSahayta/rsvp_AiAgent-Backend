@@ -63,7 +63,7 @@ Sutrak helps event organizers manage events, collect RSVPs from guests via AI vo
 - Events: list events, get event details, create events
 - Agents: list agents, get agent details
 - Guests: get guest list for an event
-- Samvaadik/WhatsApp: check connection status, list templates, send templates to event guests
+- Samvaadik/WhatsApp: check connection status, list templates, send templates to event guests, create new templates (text or media)
 
 ## Current user context (use this to resolve vague references)
 Events:
@@ -173,7 +173,34 @@ STEP 6 — SUMMARY & CONFIRM: Show exactly:
 **Participants CSV:** [csv_file_name or "Not uploaded — can add later from dashboard"]
 
 Say "Shall I create this event?" Only call finalize_create_event AFTER user says yes/confirm/go ahead. If they want changes — update and show summary again.
-After success: tell user their event is created. The event_created card appears with links to the dashboard.`;
+After success: tell user their event is created. The event_created card appears with links to the dashboard.
+
+## Create WhatsApp Template — Guided Conversational Flow
+When the user wants to create a WhatsApp template, call start_create_template first (this also checks the Samvaadik connection — if not connected, relay the redirect prompt and stop). Then guide them through these steps. Collect everything before calling finalize_create_template.
+
+STEP 1 — TEMPLATE TYPE: Ask "Is this a plain text template, or should it have a media header (image/video/document)?"
+
+STEP 2 — BASIC INFO:
+Ask for: Template name (required — must be lowercase letters/numbers/underscores only, no spaces; auto-convert what they give you, e.g. "Promo Banner" → "promo_banner"), Category (MARKETING, UTILITY, or AUTHENTICATION), Language (default "en_US" if they don't care).
+
+STEP 3 — BODY:
+Ask "What should the message say?" If they want personalized variables (like a name or order number), use {{1}}, {{2}}, etc. in body_text and ask for an example value for each — these go in body_examples in the same order.
+
+STEP 4 — HEADER:
+If text-only: skip, header_format stays unset.
+If TEXT header: ask for the header_text (short, no variables).
+If MEDIA header (IMAGE/VIDEO/DOCUMENT): say "Please attach the image/video/document using the + button." Once they attach a file (you'll see "[Attached: filename]" in their message), set file_name to that filename and file_type to its MIME type inferred from the extension (e.g. .jpg/.jpeg → image/jpeg, .png → image/png, .mp4 → video/mp4, .mov → video/quicktime, .pdf → application/pdf). Do not ask the user for the MIME type directly.
+
+STEP 5 — FOOTER & BUTTONS (optional):
+Ask if they want a footer line or up to 3 buttons (QUICK_REPLY or URL). For a URL button with a variable in the link, also collect url_example (a fully resolved sample URL).
+IMPORTANT — Meta rejects footer_text and button text containing emoji, newlines, or (for buttons) variables/formatting like *bold*. Never add emoji yourself in footer_text or button text, and if the user includes emoji/newlines in what they type for these two fields, plain-text them out before showing the summary so it matches what's actually submitted. Body text, header text, and URLs may still contain emoji — this restriction is only for footer_text and button text.
+
+STEP 6 — SUMMARY & CONFIRM:
+Show a complete summary of name, category, language, body, header (if any), footer (if any), and buttons (if any). Say "Shall I submit this template?" Only call finalize_create_template AFTER the user explicitly confirms.
+
+WHAT HAPPENS NEXT:
+- If the result has action_type "template_created" — tell the user the template was submitted to Meta for approval and approval can take a few minutes to a few hours.
+- If the result has action_type "template_media_upload_required" — tell the user their media is being uploaded and the template will be submitted automatically once it finishes; the frontend handles the actual upload, you don't need to do anything else.`;
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -312,6 +339,37 @@ export async function handleAssistantChat(req, res) {
           pendingAction = {
             type: "create_event_wizard",
             agents: result.agents,
+          };
+        }
+
+        // Template wizard started
+        if (result.action_type === "create_template_wizard") {
+          pendingAction = {
+            type: "create_template_wizard",
+            steps: result.steps,
+          };
+        }
+
+        // Media template — frontend must PUT the file to signed_url, then
+        // call POST /api/samvaadik/templates/complete-media-upload with
+        // storage_path + the template fields below to finish submission.
+        if (result.action_type === "template_media_upload_required") {
+          pendingAction = {
+            type: "template_media_upload_required",
+            signed_url: result.signed_url,
+            storage_path: result.storage_path,
+            expires_in_seconds: result.expires_in_seconds,
+            file_name: result.file_name,
+            file_type: result.file_type,
+            template: result.template,
+          };
+        }
+
+        // Text template created (or media template completed) — show card
+        if (result.action_type === "template_created") {
+          pendingAction = {
+            type: "template_created",
+            template: result.template,
           };
         }
 

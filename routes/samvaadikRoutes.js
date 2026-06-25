@@ -13,6 +13,7 @@ import {
   proxyTemplateMedia,
   getSamvaadikTemplateMedia,
   getSamvaadikTemplate,
+  completeTemplateMediaUpload,
   syncWebhooksForAllUsers,
 } from "../controllers/samvaadikConnectionController.js";
 
@@ -41,6 +42,11 @@ router.get("/templates/:wt_id", getSamvaadikTemplateInfo);
 
 // GET    /api/samvaadik/templates    → fetch approved templates from Samvaadik
 router.get("/templates", getSamvaadikTemplates);
+
+// POST   /api/samvaadik/templates/complete-media-upload
+// Called by the frontend right after it PUTs the file binary to the
+// signed_url from finalize_create_template (assistant media-template flow).
+router.post("/templates/complete-media-upload", completeTemplateMediaUpload);
 
 router.post("/sync-webhooks", syncWebhooksForAllUsers);
 

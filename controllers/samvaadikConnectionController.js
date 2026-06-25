@@ -5,6 +5,8 @@ import {
   validateAndFetchAccount,
   updateWebhookUrl,
   getTemplates,
+  processMediaUpload,
+  createWhatsappTemplate,
 } from "../utils/samvaadikClient.js";
 
 import axios from "axios";
@@ -451,6 +453,118 @@ export const getSamvaadikTemplateMedia = async (req, res) => {
           '<text x="50%" y="65%" text-anchor="middle" fill="#3f3f46" font-size="11" font-family="system-ui">Preview unavailable</text>' +
           "</svg>",
       );
+  }
+};
+
+/* ─── POST /api/samvaadik/templates/complete-media-upload ────────────────── */
+/**
+ * Final step of the media-template assistant flow (Option A — signed URL).
+ * The frontend already PUT the raw file bytes straight to the signed_url
+ * returned by finalize_create_template — this only carries the storage_path,
+ * not the bytes. Here we:
+ *   1. Exchange storage_path for a Meta media_id + header_handle (process-upload)
+ *   2. Submit the template (name/category/body/etc + header_handle/media_id)
+ * Called directly by the frontend once the upload PUT succeeds — not through
+ * the assistant chat loop, same pattern as the event CSV upload.
+ */
+export const completeTemplateMediaUpload = async (req, res) => {
+  try {
+    const user_id = req.user?.user_id;
+    if (!user_id) return res.status(401).json({ error: "Unauthorized" });
+
+    const {
+      storage_path,
+      file_name,
+      file_type,
+      name,
+      category,
+      language,
+      body_text,
+      body_examples,
+      header_format,
+      footer_text,
+      buttons,
+    } = req.body;
+
+    if (!storage_path || !file_name || !file_type) {
+      return res.status(400).json({
+        error: "storage_path, file_name and file_type are required",
+      });
+    }
+    if (!name || !category || !body_text) {
+      return res
+        .status(400)
+        .json({ error: "name, category and body_text are required" });
+    }
+
+    const { data: conn, error: connErr } = await supabase
+      .from("samvaadik_connections")
+      .select("api_key, status")
+      .eq("user_id", user_id)
+      .maybeSingle();
+
+    if (connErr) throw connErr;
+    if (!conn || conn.status !== "active")
+      return res.status(400).json({ error: "No active Samvaadik connection" });
+
+    const processed = await processMediaUpload(conn.api_key, {
+      storage_path,
+      file_name,
+      file_type,
+    });
+    console.log("Media upload processed:", processed);
+    if (!processed.success) {
+      return res.status(502).json({
+        error: "Failed to process uploaded media",
+        details: processed,
+      });
+    }
+
+    console.log(
+      processed.media_id,
+      processed.header_handle,
+      processed.header_format,
+      name,
+      category,
+      body_text,
+      footer_text,
+      buttons,
+    );
+
+    const templateResult = await createWhatsappTemplate(conn.api_key, {
+      name,
+      category,
+      language: language || "en_US",
+      body_text,
+      ...(Array.isArray(body_examples) &&
+        body_examples.length > 0 && { body_examples }),
+      header_format: header_format || processed.header_format,
+      header_handle: processed.header_handle,
+      media_id: processed.media_id,
+      ...(footer_text && { footer_text }),
+      ...(Array.isArray(buttons) && buttons.length > 0 && { buttons }),
+    });
+
+    console.log("Template creation result:", templateResult);
+
+    if (!templateResult.success) {
+      return res.status(502).json({
+        error: "Failed to create template",
+        details: templateResult,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: templateResult.data,
+      message: templateResult.message,
+    });
+  } catch (err) {
+    console.error(
+      "completeTemplateMediaUpload error:",
+      err.response?.data || err.message,
+    );
+    return res.status(500).json({ error: "Failed to create media template" });
   }
 };
 

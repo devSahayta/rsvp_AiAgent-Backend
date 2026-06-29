@@ -29,12 +29,10 @@ export const testVoiceAgent = async (req, res) => {
         .json({ success: false, message: "Phone number is required" });
     }
     if (!user_id) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "User ID is required for credit tracking",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required for credit tracking",
+      });
     }
 
     // ── Check credits ──────────────────────────────────────────────
@@ -69,12 +67,10 @@ export const testVoiceAgent = async (req, res) => {
         .json({ success: false, message: "Agent not found" });
     }
     if (!agent.is_active || !agent.voice_enabled) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Voice not enabled or agent inactive",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Voice not enabled or agent inactive",
+      });
     }
     if (!agent.elevenlabs_agent_id) {
       return res
@@ -143,7 +139,12 @@ export const testVoiceAgent = async (req, res) => {
     // Include ALL dynamic variables the ElevenLabs agent needs —
     // both first_message template vars AND tool call vars.
     // Test mode uses placeholder values for participant_id.
+    const voiceName = agent.voice_name
+      ? agent.voice_name.split("-")[0].trim()
+      : null;
+
     const dynamic_variables = {
+      agent_name: String(voiceName || agent.agent_name || "Agent"),
       eventId: String(agent_id),
       eventName: String(agent.event_title),
       event_name: String(agent.event_title),
@@ -160,15 +161,14 @@ export const testVoiceAgent = async (req, res) => {
       agentPhoneNumberId: ELEVENLABS_AGENT_PHONE_NUMBER_ID,
       toNumber: to_number,
       dynamicVariables: dynamic_variables,
+      voiceId: agent.voice_id || null, // Optional: override agent's default voice
     });
 
     if (!elevenResponse.success) {
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message: "Failed to initiate ElevenLabs test batch call",
-        });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to initiate ElevenLabs test batch call",
+      });
     }
 
     // ── Create Test Session ────────────────────────────────────────
@@ -212,12 +212,10 @@ export const testVoiceAgent = async (req, res) => {
     });
   } catch (err) {
     console.error("Voice test batch error:", err);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Something went wrong while testing voice agent",
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while testing voice agent",
+    });
   }
 };
 
@@ -248,12 +246,10 @@ export const getTestSession = async (req, res) => {
     return res.status(200).json({ success: true, data: testSession });
   } catch (err) {
     console.error("Get test session error:", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Something went wrong while fetching test session",
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while fetching test session",
+    });
   }
 };
 
@@ -301,12 +297,10 @@ export const getUserTestSessions = async (req, res) => {
     });
   } catch (err) {
     console.error("Get user test sessions error:", err.message);
-    return res
-      .status(500)
-      .json({
-        success: false,
-        message: "Something went wrong while fetching test sessions",
-      });
+    return res.status(500).json({
+      success: false,
+      message: "Something went wrong while fetching test sessions",
+    });
   }
 };
 
@@ -464,12 +458,10 @@ export const testChatAgent = async (req, res) => {
         .json({ success: false, error: "Message is required" });
     }
     if (!user_id) {
-      return res
-        .status(400)
-        .json({
-          success: false,
-          error: "User ID is required for credit tracking",
-        });
+      return res.status(400).json({
+        success: false,
+        error: "User ID is required for credit tracking",
+      });
     }
 
     // ── Check credits ──────────────────────────────────────────────

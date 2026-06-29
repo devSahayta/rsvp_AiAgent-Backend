@@ -23,6 +23,7 @@ import agentSystemRoutes from "./routes/agentSystemRoutes.js";
 import { startVoiceTestSyncCron } from "./crons/voiceTestSyncCron.js";
 import { startProductionBatchSyncCron } from "./crons/productionBatchSyncCron.js";
 import assistantRoutes from "./routes/assistantRoutes.js";
+import voiceRoutes from "./routes/voiceRoutes.js";
 
 import samvaadikRoutes from "./routes/samvaadikRoutes.js";
 dotenv.config();
@@ -77,6 +78,9 @@ app.use("/api/transport", transportRoutes);
 
 // Agent system routes
 app.use("/api/agent-system", agentSystemRoutes);
+
+// Voice routes
+app.use("/api/voices", voiceRoutes);
 
 // add after other routes:
 app.use("/api/samvaadik", samvaadikRoutes);

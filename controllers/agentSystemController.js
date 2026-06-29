@@ -5,6 +5,7 @@ import {
   duplicateAgent,
   updateAgent,
   deleteAgent,
+  addSharedVoice,
 } from "../utils/elevenlabsApi.js";
 /**
  * GET /api/agent-system/templates
@@ -123,6 +124,9 @@ export const createAgent = async (req, res) => {
       event_title,
       field_mode = "classic",
       smart_fields = [],
+      voice_id,
+      voice_name,
+      public_owner_id,
     } = req.body;
 
     // Common required fields
@@ -179,6 +183,29 @@ export const createAgent = async (req, res) => {
         .json({ success: false, error: "Invalid knowledge base" });
     }
 
+    // Voices picked from the ElevenLabs shared-voices library are only
+    // browsable/previewable — they must be imported into our account's
+    // voice library before they're usable in actual TTS/calls.
+    let resolvedVoiceId = voice_id || null;
+    let voiceImportWarning = null;
+    if (voice_id && public_owner_id) {
+      try {
+        const imported = await addSharedVoice({
+          publicOwnerId: public_owner_id,
+          voiceId: voice_id,
+          newName: voice_name || `voice-${voice_id}`,
+        });
+        resolvedVoiceId = imported.voice_id || voice_id;
+      } catch (importError) {
+        console.error(
+          "⚠️ Failed to import shared voice into ElevenLabs account:",
+          importError.response?.data || importError.message,
+        );
+        voiceImportWarning =
+          "Selected voice could not be imported into the ElevenLabs voice library — calls will fall back to the default voice until this is resolved.";
+      }
+    }
+
     // ─── CLASSIC MODE ────────────────────────────────────────────────────────
     if (field_mode === "classic") {
       // Verify template
@@ -221,6 +248,12 @@ export const createAgent = async (req, res) => {
         },
       ];
 
+      // Set the agent's own default voice (this is a dedicated duplicated
+      // agent, so it's safe to set directly rather than only overriding per-call)
+      if (resolvedVoiceId) {
+        agentConfig.conversation_config.tts.voice_id = resolvedVoiceId;
+      }
+
       //4) Update agent (PATCH)
       await updateAgent({
         agentId: duplicatedAgent.agent_id,
@@ -240,6 +273,8 @@ export const createAgent = async (req, res) => {
           status: "unassigned",
           event_title,
           field_mode: "classic",
+          voice_id: resolvedVoiceId,
+          voice_name: voice_name || null,
         })
         .select(
           `*, agent_templates (name, slug, icon_url, config), knowledge_bases (id, name)`,
@@ -248,7 +283,9 @@ export const createAgent = async (req, res) => {
 
       if (agentError) throw agentError;
 
-      return res.status(201).json({ success: true, data: agent });
+      return res
+        .status(201)
+        .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
     }
 
     // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
@@ -302,13 +339,17 @@ export const createAgent = async (req, res) => {
         smart_fields,
         first_message,
         // system_prompt: final_system_prompt,
+        voice_id: resolvedVoiceId,
+        voice_name: voice_name || null,
       })
       .select(`*, knowledge_bases (id, name)`)
       .single();
 
     if (agentError) throw agentError;
 
-    return res.status(201).json({ success: true, data: agent });
+    return res
+      .status(201)
+      .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
   } catch (error) {
     console.error("Error creating agent:", error);
     res.status(500).json({ success: false, error: error.message });

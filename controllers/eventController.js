@@ -629,7 +629,9 @@ export const triggerBatchCall = async (req, res) => {
     // 3️⃣ Fetch agent row once — need first_message and elevenlabs_agent_id for recipients
     const { data: agentData, error: agentError } = await supabase
       .from("agents")
-      .select("elevenlabs_agent_id, first_message")
+      .select(
+        "elevenlabs_agent_id, first_message, voice_id, agent_name, voice_name",
+      )
       .eq("agent_id", eventData.agent_id)
       .single();
 
@@ -691,8 +693,13 @@ export const triggerBatchCall = async (req, res) => {
       // Smart fields: pass event_id + participant_id (snake_case) so the
       // ElevenLabs tool can include them in the POST body to /api/events/rsvp-responses.
       // Classic: keep original camelCase variables used by the fixed agent prompt.
+      const voiceName = agentData.voice_name
+        ? agentData.voice_name.split("-")[0].trim()
+        : null;
+
       const dynamic_variables = isSmartFields
         ? {
+            agent_name: String(voiceName || agentData.agent_name || "Agent"),
             event_id: String(eventId),
             event_name: String(eventData.event_name),
             participant_id: String(p.participant_id),
@@ -715,7 +722,7 @@ export const triggerBatchCall = async (req, res) => {
               language: null,
             },
             tts: {
-              voice_id: null,
+              voice_id: agentData.voice_id || null,
             },
           },
           dynamic_variables,

@@ -24,6 +24,7 @@ import {
   formatCredits,
 } from "../config/creditPricing.js";
 import { getUserById, updateUserCredits } from "../models/userModel.js";
+import { dispatchEventFollowup } from "../utils/followupDispatcher.js";
 
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import fetch from "node-fetch";
@@ -1096,6 +1097,8 @@ export const syncBatchStatuses = async (req, res) => {
 
         const existingLogId = logByParticipant[participantId];
 
+        let callLogId = existingLogId || null;
+
         if (existingLogId) {
           const { error: updateError } = await supabase
             .from("event_call_logs")
@@ -1108,7 +1111,7 @@ export const syncBatchStatuses = async (req, res) => {
 
           if (!updateError) updatedCount++;
         } else {
-          const { error: insertError } = await supabase
+          const { data: insertedLog, error: insertError } = await supabase
             .from("event_call_logs")
             .insert({
               event_id: eventId,
@@ -1116,9 +1119,34 @@ export const syncBatchStatuses = async (req, res) => {
               recipient_status: recipient.status,
               conversation_id: recipient.conversation_id || null,
               call_outcome: "pending",
-            });
+            })
+            .select("call_log_id")
+            .single();
 
-          if (!insertError) updatedCount++;
+          if (!insertError) {
+            updatedCount++;
+            callLogId = insertedLog?.call_log_id || null;
+          }
+        }
+
+        // "Unanswered" follow-up trigger — best-effort, never blocks the sync response.
+        const UNANSWERED_STATUSES = [
+          "initiated",
+          "no-answer",
+          "no_answer",
+          "failed",
+          "error",
+          "busy",
+        ];
+        if (callLogId && UNANSWERED_STATUSES.includes(recipient.status)) {
+          dispatchEventFollowup({
+            eventId,
+            participantId,
+            callLogId,
+            answered: false,
+          }).catch((err) =>
+            console.warn("Follow-up dispatch failed (non-fatal):", err.message),
+          );
         }
       }
     } else {

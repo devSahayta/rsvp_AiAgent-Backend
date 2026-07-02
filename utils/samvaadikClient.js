@@ -76,6 +76,46 @@ export const sendTemplate = async (
 };
 
 /**
+ * Schedule an approved WhatsApp template message for future delivery.
+ * POST /v1/messages/schedule
+ * NOTE: wt_id here is the Samvaadik whatsapp_templates table UUID, fetched
+ * via getTemplates() — it is NOT Sutrak's own whatsapp_templates.wt_id.
+ */
+export const scheduleTemplateMessage = async (
+  apiKey,
+  {
+    phone,
+    contact_name,
+    wt_id,
+    scheduled_at,
+    timezone,
+    template_variables,
+    media_id,
+  },
+) => {
+  const res = await client(apiKey).post("/messages/schedule", {
+    phone,
+    contact_name,
+    wt_id,
+    scheduled_at,
+    ...(timezone && { timezone }),
+    ...(template_variables && { template_variables }),
+    ...(media_id && { media_id }),
+  });
+  return res.data;
+};
+
+/**
+ * Fetch the current status of a previously scheduled template message.
+ * GET /v1/messages/schedule/:sm_id
+ * Returns: { success, data: { sm_id, status, sent_at, failed_at, error_message, ... } }
+ */
+export const getScheduledMessageStatus = async (apiKey, sm_id) => {
+  const res = await client(apiKey).get(`/messages/schedule/${sm_id}`);
+  return res.data;
+};
+
+/**
  * Send an interactive message with quick-reply buttons (within 24h window).
  * POST /v1/messages/interactive — max 3 buttons
  * buttons: [{ id: "btn_yes", title: "Yes" }, ...]

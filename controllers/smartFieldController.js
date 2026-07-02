@@ -1,4 +1,5 @@
 import { supabase } from "../config/supabase.js";
+import { dispatchEventFollowup } from "../utils/followupDispatcher.js";
 
 /**
  * GET /api/events/:eventId/smart-fields
@@ -291,6 +292,8 @@ export const saveRsvpResponses = async (req, res) => {
       .eq("participant_id", participant_id)
       .maybeSingle();
 
+    let callLogId = existingLog?.call_log_id || null;
+
     if (existingLog) {
       await supabase
         .from("event_call_logs")
@@ -302,13 +305,32 @@ export const saveRsvpResponses = async (req, res) => {
         })
         .eq("call_log_id", existingLog.call_log_id);
     } else {
-      await supabase.from("event_call_logs").insert({
-        event_id,
-        participant_id,
-        conversation_id: conversation_id || null,
-        call_duration: call_duration ?? null,
-        call_outcome: "completed",
-      });
+      const { data: insertedLog } = await supabase
+        .from("event_call_logs")
+        .insert({
+          event_id,
+          participant_id,
+          conversation_id: conversation_id || null,
+          call_duration: call_duration ?? null,
+          call_outcome: "completed",
+        })
+        .select("call_log_id")
+        .single();
+      callLogId = insertedLog?.call_log_id || null;
+    }
+
+    // Best-effort — must never fail the ElevenLabs webhook response.
+    if (callLogId) {
+      try {
+        await dispatchEventFollowup({
+          eventId: event_id,
+          participantId: participant_id,
+          callLogId,
+          answered: true,
+        });
+      } catch (followupErr) {
+        console.warn("Follow-up dispatch failed (non-fatal):", followupErr.message);
+      }
     }
 
     console.log("RSVP responses saved:", data);

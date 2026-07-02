@@ -28,6 +28,13 @@ import {
 } from "../controllers/smartFieldController.js";
 
 import {
+  upsertFollowupRule,
+  getFollowupRule,
+  getFollowupStatusForEvent,
+  syncFollowupStatus,
+} from "../controllers/eventFollowupController.js";
+
+import {
   getParticipantTranscript,
   getParticipantAudio,
 } from "../controllers/transcriptController.js";
@@ -105,6 +112,12 @@ router.get("/:eventId/dashboard", getDashboardData);
 // Smart fields
 router.get("/:eventId/smart-fields", getEventSmartFields);
 router.get("/:eventId/smart-rsvp-data", getSmartRsvpData);
+
+// Follow-up rule
+router.post("/:eventId/followup-rule", upsertFollowupRule);
+router.get("/:eventId/followup-rule", getFollowupRule);
+router.get("/:eventId/followup-status", getFollowupStatusForEvent);
+router.post("/:eventId/followup-status/sync", syncFollowupStatus);
 
 // Delete
 router.delete("/:eventId", deleteEvent);

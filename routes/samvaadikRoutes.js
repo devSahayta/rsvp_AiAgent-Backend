@@ -15,6 +15,8 @@ import {
   getSamvaadikTemplate,
   completeTemplateMediaUpload,
   syncWebhooksForAllUsers,
+  sendSamvaadikTextMessage,
+  scheduleSamvaadikTemplateMessage,
 } from "../controllers/samvaadikConnectionController.js";
 
 const router = express.Router();
@@ -49,5 +51,11 @@ router.get("/templates", getSamvaadikTemplates);
 router.post("/templates/complete-media-upload", completeTemplateMediaUpload);
 
 router.post("/sync-webhooks", syncWebhooksForAllUsers);
+
+// POST   /api/samvaadik/messages/text      → send a free-text message
+router.post("/messages/text", sendSamvaadikTextMessage);
+
+// POST   /api/samvaadik/messages/schedule  → schedule an approved template message
+router.post("/messages/schedule", scheduleSamvaadikTemplateMessage);
 
 export default router;

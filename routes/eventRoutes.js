@@ -1,4 +1,4 @@
-// routes/eventRoutes.js — Final version with assistant routes correctly ordered
+// routes/eventRoutes.js
 
 import express from "express";
 import multer from "multer";
@@ -17,6 +17,12 @@ import {
   getBatchStatus,
   getDashboardData,
   deleteEvent,
+  // ── NEW: participant CRUD + activity status ──────────────────────────────
+  updateParticipant,
+  deleteParticipants,
+  createParticipant,
+  getEventActivityStatus,
+  retryBatchCallSelected, // ← NEW
 } from "../controllers/eventController.js";
 
 import { authenticateUser } from "../middleware/authMiddleware.js";
@@ -32,81 +38,75 @@ import {
   getParticipantAudio,
 } from "../controllers/transcriptController.js";
 
-import {
-  assistantCreateEvent,
-  assistantUploadCsv,
-} from "../controllers/assistantEventController.js";
-
 const router = express.Router();
 
+// File upload config
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// IMPORTANT: Static string routes MUST come before /:eventId param routes
-// otherwise Express matches "assistant-create" as an eventId param.
-// ─────────────────────────────────────────────────────────────────────────────
+// ---------- ROUTES ----------
 
-// ── Assistant routes ──────────────────────────────────────────────────────────
-// Internal server-to-server call — no authenticateUser (user_id in body)
-router.post("/assistant-create", assistantCreateEvent);
-
-// ── Smart fields (static path — before /:eventId) ────────────────────────────
-router.post("/rsvp-responses", saveRsvpResponses);
-
-// ── Standard event CRUD ───────────────────────────────────────────────────────
+// Create event + CSV upload
 router.post("/", upload.single("dataset"), createEventWithCsv);
+
+// Get user events
 router.get("/", getEventsByUser);
 
-// ── Param routes (:eventId) ───────────────────────────────────────────────────
+// Smart fields endpoints (keep before /:eventId to avoid conflict)
+router.post("/rsvp-responses", saveRsvpResponses);
+
+// Get single event by ID
 router.get("/:eventId", getEventById);
 
-// CSV upload from assistant frontend (frontend sends JWT → authenticateUser works)
-router.post(
-  "/:eventId/upload-csv",
-  authenticateUser,
-  upload.single("dataset"),
-  assistantUploadCsv,
-);
-
-// Batch
+// Batch operations
 router.post("/:eventId/call-batch", triggerBatchCall);
 router.post("/:eventId/retry-batch", retryBatchCall);
+router.post("/:eventId/retry-batch-selected", retryBatchCallSelected); // ← NEW
 router.post("/:eventId/sync-batch-status", syncBatchStatuses);
 router.get("/:eventId/batch-status", getBatchStatus);
 
-// RSVP
+// ── NEW: Realtime activity status (for edit/delete locking) ────────────────
+router.get("/:eventId/activity-status", getEventActivityStatus);
+
+// RSVP data
 router.get("/:eventId/rsvps", getRSVPDataByEvent);
 router.get("/:eventId/rsvp-data", getEventRSVPData);
 
 // Participants
 router.get("/:event_id/participants", getEventParticipants);
 
-// Transcript + Audio
+// ── NEW: Add / Edit / Delete participants ───────────────────────────────────
+router.post("/:eventId/participants", createParticipant);
+router.patch("/:eventId/participants/:participantId", updateParticipant);
+router.delete("/:eventId/participants", deleteParticipants);
+
+// Transcript + Audio — per participant
 router.get(
   "/:eventId/participants/:participantId/transcript",
   getParticipantTranscript,
 );
 router.get("/:eventId/participants/:participantId/audio", getParticipantAudio);
 
-// Details / conversation
+// Event details (Protected)
 router.get("/:eventId/details", authenticateUser, getEventDetails);
+
+// Conversation tracking
 router.get(
   "/:eventId/conversation-status",
   authenticateUser,
   getConversationStatus,
 );
 
-// Dashboard
+// Dashboard data
 router.get("/:eventId/dashboard", getDashboardData);
 
 // Smart fields
 router.get("/:eventId/smart-fields", getEventSmartFields);
 router.get("/:eventId/smart-rsvp-data", getSmartRsvpData);
 
-// Delete
+// DELETE event
 router.delete("/:eventId", deleteEvent);
 
 export default router;

@@ -6,7 +6,7 @@ import {
   startInitialMessage,
   sendBatchInitialMessage,
   handleSamvaadikWebhook,
-  sendSamvaadikBatch,
+  sendSamvaadikBatch, // ← NEW
 } from "../controllers/whatsappController.js";
 import { authenticateUser } from "../middleware/authMiddleware.js";
 
@@ -20,6 +20,7 @@ router.post("/whatsapp/start-initial-message", startInitialMessage);
 // Samvaadik forwarded webhooks
 router.post("/whatsapp/samvaadik-webhook", handleSamvaadikWebhook);
 
+// ── NEW: Send Samvaadik template to all/selected participants ──────────────
 router.post("/whatsapp/samvaadik-batch", sendSamvaadikBatch);
 
 export default router;

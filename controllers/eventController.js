@@ -1024,6 +1024,216 @@ export const retryBatchCall = async (req, res) => {
   }
 };
 
+export const retryBatchCallSelected = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { participant_ids } = req.body;
+
+    if (!participant_ids?.length) {
+      return res
+        .status(400)
+        .json({ error: "participant_ids array is required" });
+    }
+
+    // 1️⃣ Fetch event details
+    const { data: eventData, error: eventError } = await supabase
+      .from("events")
+      .select("*")
+      .eq("event_id", eventId)
+      .single();
+
+    if (eventError || !eventData) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const user_id = eventData.user_id;
+
+    // 2️⃣ Fetch only the selected participants
+    const { data: participants, error: participantError } = await supabase
+      .from("participants")
+      .select("participant_id, full_name, phone_number, event_id")
+      .eq("event_id", eventId)
+      .in("participant_id", participant_ids);
+
+    if (participantError) throw participantError;
+
+    if (!participants || participants.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "None of the selected participants found" });
+    }
+
+    console.log(
+      `🔁 Retrying ${participants.length} selected participant(s) for event ${eventId}`,
+    );
+
+    // ── Credit check (same pattern as triggerBatchCall) ──────────────────
+    const user = await getUserById(user_id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const ESTIMATED_MINUTES_PER_CALL = 3;
+    const totalEstimatedMinutes =
+      participants.length * ESTIMATED_MINUTES_PER_CALL;
+    const estimatedCredits =
+      totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+    if (user.credits < estimatedCredits) {
+      return res.status(402).json({
+        error: "Insufficient credits to retry selected participants",
+        current_balance: formatCredits(user.credits),
+        estimated_credits: formatCredits(estimatedCredits),
+        shortfall: formatCredits(estimatedCredits - user.credits),
+        participants_count: participants.length,
+      });
+    }
+
+    // 3️⃣ Fetch agent details (same as triggerBatchCall)
+    const { data: agentData, error: agentError } = await supabase
+      .from("agents")
+      .select("elevenlabs_agent_id, first_message")
+      .eq("agent_id", eventData.agent_id)
+      .single();
+
+    if (agentError || !agentData?.elevenlabs_agent_id) {
+      return res
+        .status(400)
+        .json({ error: "ElevenLabs agent not configured properly" });
+    }
+
+    const elevenAgentId = agentData.elevenlabs_agent_id;
+    const agentFirstMessage = agentData.first_message || null;
+    const isSmartFields = eventData.field_mode === "smart_fields";
+
+    // ── Smart fields question block (same as triggerBatchCall) ───────────
+    let smart_fields_block = "";
+    if (isSmartFields) {
+      const { data: smartFields } = await supabase
+        .from("event_smart_fields")
+        .select(
+          "field_key, field_label, field_type, ai_question, options, display_order",
+        )
+        .eq("event_id", eventId)
+        .order("display_order", { ascending: true });
+
+      if (smartFields && smartFields.length > 0) {
+        smart_fields_block = smartFields
+          .map((f, i) => {
+            let typeLine = `Type: ${f.field_type}`;
+            if (
+              f.field_type === "choice" &&
+              Array.isArray(f.options) &&
+              f.options.length
+            ) {
+              typeLine += ` | Options: ${f.options.join(", ")}`;
+            }
+            return `${i + 1}. Ask: "${f.ai_question}"\n   field_key: ${f.field_key}\n   ${typeLine}`;
+          })
+          .join("\n\n");
+      }
+    }
+
+    // 4️⃣ Build recipients (same shape as triggerBatchCall)
+    const recipients = participants.map((p) => {
+      let formattedPhone = String(p.phone_number || "").trim();
+      if (formattedPhone && !formattedPhone.startsWith("+")) {
+        formattedPhone = "+" + formattedPhone;
+      }
+
+      const dynamic_variables = isSmartFields
+        ? {
+            event_id: String(eventId),
+            event_name: String(eventData.event_name),
+            participant_id: String(p.participant_id),
+            guest_name: String(p.full_name),
+            knowledge_base_id: String(eventData.knowledge_base_id),
+            smart_fields_block,
+          }
+        : {
+            eventId: String(eventId),
+            eventName: String(eventData.event_name),
+          };
+
+      return {
+        id: String(p.participant_id),
+        conversation_initiation_client_data: {
+          conversation_config_override: {
+            agent: {
+              prompt: null,
+              first_message: agentFirstMessage,
+              language: null,
+            },
+            tts: { voice_id: null },
+          },
+          dynamic_variables,
+        },
+        phone_number: formattedPhone,
+      };
+    });
+
+    const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+
+    const payload = {
+      call_name: `event-${eventId}-retry-selected-${Date.now()}`,
+      agent_id: elevenAgentId,
+      agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+      whatsapp_params: null,
+      recipients,
+      scheduled_time_unix: scheduledUnix,
+    };
+
+    // 5️⃣ Submit to ElevenLabs
+    const response = await fetch(
+      "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ ElevenLabs retry-selected error:", data);
+      return res
+        .status(500)
+        .json({ error: "Retry call failed", details: data });
+    }
+
+    console.log(
+      `✅ Selected retry batch created: ${data.id} (${participants.length} participants)`,
+    );
+
+    // 6️⃣ Reset call_status to pending for these participants so the table
+    //     correctly shows them as "in progress" again
+    await supabase
+      .from("conversation_results")
+      .update({
+        call_status: "pending",
+        last_updated: new Date().toISOString(),
+      })
+      .in("participant_id", participant_ids);
+
+    return res.status(200).json({
+      message: `✅ Retry started for ${participants.length} selected participant(s)`,
+      batch: data,
+      participants_count: participants.length,
+      credit_info: {
+        estimated_credits: formatCredits(estimatedCredits),
+        current_balance: formatCredits(user.credits),
+      },
+    });
+  } catch (err) {
+    console.error("retryBatchCallSelected error:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to retry selected participants" });
+  }
+};
+
 export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
@@ -1388,5 +1598,357 @@ export const deleteEvent = async (req, res) => {
   } catch (error) {
     console.error("Delete event error:", error);
     return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+export const updateParticipant = async (req, res) => {
+  try {
+    const { eventId, participantId } = req.params;
+    const { full_name, phone_number, email, smart_field_values } = req.body;
+
+    if (!full_name?.trim())
+      return res.status(400).json({ error: "full_name is required" });
+    if (!phone_number?.trim())
+      return res.status(400).json({ error: "phone_number is required" });
+
+    // ── 1. Update basic participant info ──────────────────────────────────
+    const { data, error } = await supabase
+      .from("participants")
+      .update({
+        full_name: full_name.trim(),
+        phone_number: phone_number.trim(),
+        email: email?.trim() || null,
+        uploaded_at: new Date().toISOString(),
+      })
+      .eq("participant_id", participantId)
+      .eq("event_id", eventId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    if (!data) return res.status(404).json({ error: "Participant not found" });
+
+    // ── 2. Upsert smart field responses (if provided) ─────────────────────
+    if (smart_field_values && Object.keys(smart_field_values).length > 0) {
+      try {
+        // Get field definitions for field_id lookup
+        const { data: smartFields } = await supabase
+          .from("event_smart_fields")
+          .select("field_id, field_key, field_label")
+          .eq("event_id", eventId);
+
+        const fieldMap = {};
+        (smartFields || []).forEach((f) => {
+          fieldMap[f.field_key] = f;
+        });
+
+        const rsvpRows = Object.entries(smart_field_values)
+          .filter(([, v]) => v !== undefined && v !== null && v !== "")
+          .map(([key, value]) => ({
+            event_id: eventId,
+            participant_id: participantId,
+            field_id: fieldMap[key]?.field_id || null,
+            field_key: key,
+            field_label: fieldMap[key]?.field_label || key,
+            response_value: String(value),
+            collected_via: "manual_edit",
+            collected_at: new Date().toISOString(),
+          }));
+
+        if (rsvpRows.length) {
+          const { error: rsvpErr } = await supabase
+            .from("event_rsvp_responses")
+            .upsert(rsvpRows, {
+              onConflict: "event_id,participant_id,field_key",
+            });
+
+          if (rsvpErr) {
+            console.warn(
+              "[updateParticipant] event_rsvp_responses upsert warn:",
+              rsvpErr.message,
+            );
+          } else {
+            console.log(
+              `[updateParticipant] ✅ Updated ${rsvpRows.length} field response(s)`,
+            );
+          }
+        }
+
+        // ── 3. Keep conversation_results.collected_answers in sync ─────────
+        // This is what the call-batch dashboard reads, so keep it consistent.
+        const { data: existingConvo } = await supabase
+          .from("conversation_results")
+          .select("result_id, collected_answers")
+          .eq("participant_id", participantId)
+          .maybeSingle();
+
+        const mergedAnswers = {
+          ...(existingConvo?.collected_answers || {}),
+          ...smart_field_values,
+        };
+
+        if (existingConvo) {
+          await supabase
+            .from("conversation_results")
+            .update({
+              collected_answers: mergedAnswers,
+              call_status: "completed",
+              last_updated: new Date().toISOString(),
+            })
+            .eq("result_id", existingConvo.result_id);
+        } else {
+          await supabase.from("conversation_results").insert({
+            participant_id: participantId,
+            event_id: eventId,
+            call_status: "completed",
+            collected_answers: smart_field_values,
+            last_updated: new Date().toISOString(),
+          });
+        }
+
+        console.log(
+          `[updateParticipant] ✅ conversation_results synced for ${participantId}`,
+        );
+      } catch (fieldErr) {
+        // Never let smart field errors block the basic info update from returning success
+        console.error(
+          "[updateParticipant] smart field update error (non-fatal):",
+          fieldErr.message,
+        );
+      }
+    }
+
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error("[updateParticipant]", err.message);
+    return res.status(500).json({ error: "Failed to update participant" });
+  }
+};
+
+/**
+ * DELETE /api/events/:eventId/participants
+ * Body: { participant_ids: string[] }
+ * Deletes participants + their RSVP data
+ */
+export const deleteParticipants = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { participant_ids } = req.body;
+
+    if (!participant_ids?.length)
+      return res
+        .status(400)
+        .json({ error: "participant_ids array is required" });
+
+    // Delete related data first (FK constraints)
+    await supabase
+      .from("event_rsvp_responses")
+      .delete()
+      .eq("event_id", eventId)
+      .in("participant_id", participant_ids);
+
+    await supabase
+      .from("conversation_results")
+      .delete()
+      .in("participant_id", participant_ids);
+
+    await supabase
+      .from("whatsapp_ai_sessions")
+      .delete()
+      .in("participant_id", participant_ids);
+
+    // Delete participants
+    const { data, error } = await supabase
+      .from("participants")
+      .delete()
+      .eq("event_id", eventId)
+      .in("participant_id", participant_ids)
+      .select("participant_id");
+
+    if (error) throw error;
+
+    console.log(
+      `[deleteParticipants] Deleted ${data?.length} participants from event ${eventId}`,
+    );
+    return res.json({ success: true, deleted: data?.length ?? 0 });
+  } catch (err) {
+    console.error("[deleteParticipants]", err.message);
+    return res.status(500).json({ error: "Failed to delete participants" });
+  }
+};
+
+/**
+ * POST /api/events/:eventId/participants
+ * Body: { full_name, phone_number, email, smart_field_values? }
+ *
+ * Creates a participant. If smart_field_values is provided, also creates
+ * a conversation_results row pre-populated with those values (so the
+ * SmartRSVPTable shows them immediately without needing a chatbot conversation).
+ */
+export const createParticipant = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { full_name, phone_number, email, smart_field_values } = req.body;
+
+    if (!full_name?.trim())
+      return res.status(400).json({ error: "full_name is required" });
+    if (!phone_number?.trim())
+      return res.status(400).json({ error: "phone_number is required" });
+
+    // Get event to find user_id
+    const { data: event } = await supabase
+      .from("events")
+      .select("user_id, field_mode")
+      .eq("event_id", eventId)
+      .maybeSingle();
+
+    if (!event) return res.status(404).json({ error: "Event not found" });
+
+    const normalisedPhone = phone_number.trim().replace(/\D/g, "");
+
+    // Prevent duplicate phone in same event
+    const { data: existing } = await supabase
+      .from("participants")
+      .select("participant_id")
+      .eq("event_id", eventId)
+      .eq("phone_number", normalisedPhone)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({
+        error:
+          "A participant with this phone number already exists in this event",
+      });
+    }
+
+    // Insert participant
+    const { data: participant, error: pErr } = await supabase
+      .from("participants")
+      .insert({
+        event_id: eventId,
+        user_id: event.user_id,
+        full_name: full_name.trim(),
+        phone_number: normalisedPhone,
+        email: email?.trim() || null,
+        uploaded_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (pErr) throw pErr;
+
+    // If smart fields were provided, pre-fill event_rsvp_responses + conversation_results
+    // so they show up immediately in SmartRSVPTable without needing a chatbot reply
+    if (
+      event.field_mode === "smart_fields" &&
+      smart_field_values &&
+      Object.keys(smart_field_values).length
+    ) {
+      const { data: smartFields } = await supabase
+        .from("event_smart_fields")
+        .select("field_id, field_key, field_label")
+        .eq("event_id", eventId);
+
+      const fieldMap = {};
+      (smartFields || []).forEach((f) => {
+        fieldMap[f.field_key] = f;
+      });
+
+      const rsvpRows = Object.entries(smart_field_values)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([key, value]) => ({
+          event_id: eventId,
+          participant_id: participant.participant_id,
+          field_id: fieldMap[key]?.field_id || null,
+          field_key: key,
+          field_label: fieldMap[key]?.field_label || key,
+          response_value: String(value),
+          collected_via: "manual_entry",
+          collected_at: new Date().toISOString(),
+        }));
+
+      if (rsvpRows.length) {
+        await supabase.from("event_rsvp_responses").upsert(rsvpRows, {
+          onConflict: "event_id,participant_id,field_key",
+        });
+      }
+
+      // Also write conversation_results for dashboard consistency
+      await supabase.from("conversation_results").insert({
+        participant_id: participant.participant_id,
+        event_id: eventId,
+        call_status: "completed",
+        collected_answers: smart_field_values,
+        last_updated: new Date().toISOString(),
+      });
+    } else {
+      // Classic mode or no smart values — just create the placeholder row
+      await supabase.from("conversation_results").insert({
+        participant_id: participant.participant_id,
+        event_id: eventId,
+        call_status: "awaiting_rsvp",
+        last_updated: new Date().toISOString(),
+      });
+    }
+
+    console.log(
+      `[createParticipant] ✅ Created ${participant.full_name} for event ${eventId}`,
+    );
+    return res.status(201).json({ success: true, data: participant });
+  } catch (err) {
+    console.error("[createParticipant]", err.message);
+    return res.status(500).json({ error: "Failed to add participant" });
+  }
+};
+
+/**
+ * GET /api/events/:eventId/activity-status
+ * Tells the frontend whether ANY batch operation is currently in-flight
+ * for this event, so edit/delete can be disabled in realtime.
+ */
+export const getEventActivityStatus = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    // ── Check call batch status ──────────────────────────────────────────
+    const { data: event } = await supabase
+      .from("events")
+      .select("batch_status")
+      .eq("event_id", eventId)
+      .maybeSingle();
+
+    const callBatchActive =
+      event?.batch_status === "in_progress" ||
+      event?.batch_status === "pending";
+
+    // ── Check recent WhatsApp batch sends ────────────────────────────────
+    // A WhatsApp batch is considered "active" if any session for this event
+    // was triggered by a batch send in the last 2 minutes (covers dispatch time
+    // across many participants — Samvaadik sends are sequential server-side).
+    const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+
+    const { data: recentBatchSessions } = await supabase
+      .from("whatsapp_ai_sessions")
+      .select("session_id")
+      .eq("event_id", eventId)
+      .eq("triggered_by", "batch_template")
+      .gte("created_at", twoMinAgo)
+      .limit(1);
+
+    const whatsappBatchActive = (recentBatchSessions?.length || 0) > 0;
+
+    return res.json({
+      success: true,
+      call_batch_active: callBatchActive,
+      whatsapp_batch_active: whatsappBatchActive,
+    });
+  } catch (err) {
+    console.error("[getEventActivityStatus]", err.message);
+    // Fail open (not locked) — never let a backend error permanently lock the UI
+    return res.json({
+      success: false,
+      call_batch_active: false,
+      whatsapp_batch_active: false,
+    });
   }
 };

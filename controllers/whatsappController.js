@@ -1625,7 +1625,12 @@ import { createSession } from "../utils/sessionManager.js";
 
 export const sendSamvaadikBatch = async (req, res) => {
   try {
-    const { event_id, template_name, language_code = "en" } = req.body;
+    const {
+      event_id,
+      template_name,
+      language_code = "en",
+      participant_ids,
+    } = req.body;
 
     if (!event_id || !template_name) {
       return res
@@ -1650,10 +1655,12 @@ export const sendSamvaadikBatch = async (req, res) => {
       .maybeSingle();
 
     if (!conn?.api_key || conn.status !== "active") {
-      return res.status(400).json({
-        error:
-          "No active Samvaadik connection. Please connect Samvaadik first.",
-      });
+      return res
+        .status(400)
+        .json({
+          error:
+            "No active Samvaadik connection. Please connect Samvaadik first.",
+        });
     }
 
     // ── Load participants ─────────────────────────────────────────────────
@@ -1668,9 +1675,20 @@ export const sendSamvaadikBatch = async (req, res) => {
         .json({ error: "No participants found for this event" });
     }
 
+    // ── NEW: Filter to selected participants if participant_ids provided ───
+    const targets = participant_ids?.length
+      ? participants.filter((p) => participant_ids.includes(p.participant_id))
+      : participants;
+
+    if (!targets.length) {
+      return res
+        .status(404)
+        .json({ error: "None of the selected participants found" });
+    }
+
     const results = { sent: 0, failed: 0, errors: [] };
 
-    for (const participant of participants) {
+    for (const participant of targets) {
       try {
         const phone = String(participant.phone_number).replace(/\D/g, "");
         const normalised = phone.startsWith("+")
@@ -1702,7 +1720,7 @@ export const sendSamvaadikBatch = async (req, res) => {
           },
         );
 
-        // ── 2. Create WhatsApp AI session (this is what makes the bot respond) ──
+        // ── 2. Create WhatsApp AI session (makes the bot respond) ──────────
         // createSession skips if already completed (won't reset done RSVPs)
         await createSession({
           event_id,
@@ -1711,15 +1729,7 @@ export const sendSamvaadikBatch = async (req, res) => {
           triggered_by: "batch_template",
         });
 
-        // ── 3. Ensure chat row exists for dashboard ────────────────────────
-        await chatCtrl.ensureChat({
-          event_id,
-          phone_number: normalised,
-          person_name: name,
-          user_id: event.user_id,
-        });
-
-        // ── 4. Save the outbound template message ──────────────────────────
+        // ── 3. Ensure chat row + save outbound message ──────────────────────
         const chat = await chatCtrl.ensureChat({
           event_id,
           phone_number: normalised,
@@ -1753,16 +1763,16 @@ export const sendSamvaadikBatch = async (req, res) => {
     }
 
     console.log(
-      `[sendSamvaadikBatch] Done: ${results.sent} sent, ${results.failed} failed`,
+      `[sendSamvaadikBatch] Done: ${results.sent} sent, ${results.failed} failed (target: ${targets.length}/${participants.length})`,
     );
 
     return res.json({
       success: true,
       event_id,
       template: template_name,
-      total: participants.length,
+      total: targets.length,
       ...results,
-      message: `${results.sent}/${participants.length} messages sent. Chatbot is now active for replies.`,
+      message: `${results.sent}/${targets.length} messages sent. Chatbot is now active for replies.`,
     });
   } catch (err) {
     console.error("[sendSamvaadikBatch] Error:", err.message);

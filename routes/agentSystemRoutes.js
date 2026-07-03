@@ -4,6 +4,7 @@ import {
   getAgentTemplates,
   getAgentTemplate,
   createAgent,
+  updateAgentDetails,
   getUserAgents,
   getAgentDetails,
   deleteAgentComplete,
@@ -35,6 +36,7 @@ router.get("/user/:user_id", getUserAgents);
 
 // ALWAYS KEEP THIS LAST
 router.get("/:agent_id", getAgentDetails);
+router.put("/:agent_id", updateAgentDetails);
 router.delete("/:agent_id", deleteAgentComplete);
 
 export default router;

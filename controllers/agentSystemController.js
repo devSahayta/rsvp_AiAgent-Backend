@@ -5,6 +5,7 @@ import {
   duplicateAgent,
   updateAgent,
   deleteAgent,
+  addSharedVoice,
 } from "../utils/elevenlabsApi.js";
 /**
  * GET /api/agent-system/templates
@@ -123,6 +124,9 @@ export const createAgent = async (req, res) => {
       event_title,
       field_mode = "classic",
       smart_fields = [],
+      voice_id,
+      voice_name,
+      public_owner_id,
     } = req.body;
 
     // Common required fields
@@ -179,6 +183,29 @@ export const createAgent = async (req, res) => {
         .json({ success: false, error: "Invalid knowledge base" });
     }
 
+    // Voices picked from the ElevenLabs shared-voices library are only
+    // browsable/previewable — they must be imported into our account's
+    // voice library before they're usable in actual TTS/calls.
+    let resolvedVoiceId = voice_id || null;
+    let voiceImportWarning = null;
+    if (voice_id && public_owner_id) {
+      try {
+        const imported = await addSharedVoice({
+          publicOwnerId: public_owner_id,
+          voiceId: voice_id,
+          newName: voice_name || `voice-${voice_id}`,
+        });
+        resolvedVoiceId = imported.voice_id || voice_id;
+      } catch (importError) {
+        console.error(
+          "⚠️ Failed to import shared voice into ElevenLabs account:",
+          importError.response?.data || importError.message,
+        );
+        voiceImportWarning =
+          "Selected voice could not be imported into the ElevenLabs voice library — calls will fall back to the default voice until this is resolved.";
+      }
+    }
+
     // ─── CLASSIC MODE ────────────────────────────────────────────────────────
     if (field_mode === "classic") {
       // Verify template
@@ -221,6 +248,12 @@ export const createAgent = async (req, res) => {
         },
       ];
 
+      // Set the agent's own default voice (this is a dedicated duplicated
+      // agent, so it's safe to set directly rather than only overriding per-call)
+      if (resolvedVoiceId) {
+        agentConfig.conversation_config.tts.voice_id = resolvedVoiceId;
+      }
+
       //4) Update agent (PATCH)
       await updateAgent({
         agentId: duplicatedAgent.agent_id,
@@ -240,6 +273,8 @@ export const createAgent = async (req, res) => {
           status: "unassigned",
           event_title,
           field_mode: "classic",
+          voice_id: resolvedVoiceId,
+          voice_name: voice_name || null,
         })
         .select(
           `*, agent_templates (name, slug, icon_url, config), knowledge_bases (id, name)`,
@@ -248,7 +283,9 @@ export const createAgent = async (req, res) => {
 
       if (agentError) throw agentError;
 
-      return res.status(201).json({ success: true, data: agent });
+      return res
+        .status(201)
+        .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
     }
 
     // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
@@ -302,15 +339,205 @@ export const createAgent = async (req, res) => {
         smart_fields,
         first_message,
         // system_prompt: final_system_prompt,
+        voice_id: resolvedVoiceId,
+        voice_name: voice_name || null,
       })
       .select(`*, knowledge_bases (id, name)`)
       .single();
 
     if (agentError) throw agentError;
 
-    return res.status(201).json({ success: true, data: agent });
+    return res
+      .status(201)
+      .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
   } catch (error) {
     console.error("Error creating agent:", error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * PUT /api/agent-system/:agent_id
+ *
+ * Classic mode  → KB and voice are baked directly into the agent's own
+ *                 dedicated duplicated ElevenLabs agent at creation time,
+ *                 so changing either here re-injects them into that same
+ *                 ElevenLabs agent (mirrors the inject logic in createAgent).
+ *
+ * Smart fields  → All agents of this mode share ELEVENLABS_DYNAMIC_AGENT_ID;
+ *                 KB/voice/prompt are injected per-call via dynamic_variables
+ *                 (see eventController dispatch), so this is a DB-only update.
+ *
+ * field_mode and template_id are immutable after creation — the former
+ * determines how the agent was wired up, the latter is tied to the
+ * one-time duplication that already happened.
+ */
+export const updateAgentDetails = async (req, res) => {
+  try {
+    const { agent_id } = req.params;
+    const {
+      agent_name,
+      agent_description,
+      event_title,
+      knowledge_base_id,
+      smart_fields,
+      first_message,
+      voice_id,
+      voice_name,
+      public_owner_id,
+      field_mode,
+      template_id,
+    } = req.body;
+
+    const { data: agent, error: fetchError } = await supabase
+      .from("agents")
+      .select("*")
+      .eq("agent_id", agent_id)
+      .single();
+
+    if (fetchError || !agent) {
+      return res.status(404).json({ success: false, error: "Agent not found" });
+    }
+
+    if (field_mode && field_mode !== agent.field_mode) {
+      return res.status(400).json({
+        success: false,
+        error: "field_mode cannot be changed after creation",
+      });
+    }
+
+    if (template_id && template_id !== agent.template_id) {
+      return res.status(400).json({
+        success: false,
+        error: "template_id cannot be changed after creation",
+      });
+    }
+
+    if (
+      agent.field_mode === "smart_fields" &&
+      smart_fields !== undefined &&
+      (!Array.isArray(smart_fields) || smart_fields.length === 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "smart_fields must be a non-empty array",
+      });
+    }
+
+    // Validate new KB, if changing
+    let kb = null;
+    const kbChanged =
+      knowledge_base_id !== undefined &&
+      knowledge_base_id !== agent.knowledge_base_id;
+
+    if (kbChanged) {
+      const { data: kbData, error: kbError } = await supabase
+        .from("knowledge_bases")
+        .select("*")
+        .eq("id", knowledge_base_id)
+        .single();
+
+      if (kbError || !kbData) {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid knowledge base" });
+      }
+      kb = kbData;
+    }
+
+    // Resolve voice — import shared-library voice if a new public_owner_id is given
+    let resolvedVoiceId = voice_id !== undefined ? voice_id : agent.voice_id;
+    let voiceImportWarning = null;
+    const voiceChanged = voice_id !== undefined && voice_id !== agent.voice_id;
+
+    if (voiceChanged && voice_id && public_owner_id) {
+      try {
+        const imported = await addSharedVoice({
+          publicOwnerId: public_owner_id,
+          voiceId: voice_id,
+          newName: voice_name || `voice-${voice_id}`,
+        });
+        resolvedVoiceId = imported.voice_id || voice_id;
+      } catch (importError) {
+        console.error(
+          "⚠️ Failed to import shared voice into ElevenLabs account:",
+          importError.response?.data || importError.message,
+        );
+        voiceImportWarning =
+          "Selected voice could not be imported into the ElevenLabs voice library — keeping the previous voice until this is resolved.";
+        resolvedVoiceId = agent.voice_id;
+      }
+    }
+
+    // ─── CLASSIC MODE: keep the dedicated ElevenLabs duplicate in sync ──────
+    if (agent.field_mode === "classic" && (kbChanged || voiceChanged)) {
+      const agentConfig = await getAgent(agent.elevenlabs_agent_id);
+
+      if (kbChanged) {
+        agentConfig.conversation_config.agent.prompt.knowledge_base = [
+          {
+            type: "text",
+            id: kb.elevenlabs_kb_id,
+            name: kb.name,
+            usage_mode: "auto",
+          },
+        ];
+      }
+
+      if (voiceChanged) {
+        agentConfig.conversation_config.tts.voice_id = resolvedVoiceId;
+      }
+
+      await updateAgent({
+        agentId: agent.elevenlabs_agent_id,
+        payload: agentConfig,
+      });
+    }
+
+    // ─── Build DB update payload ─────────────────────────────────────────────
+    const updatePayload = {};
+    if (agent_name !== undefined) updatePayload.agent_name = agent_name;
+    if (agent_description !== undefined)
+      updatePayload.agent_description = agent_description;
+    if (event_title !== undefined) updatePayload.event_title = event_title;
+    if (kbChanged) updatePayload.knowledge_base_id = knowledge_base_id;
+    if (voiceChanged) {
+      updatePayload.voice_id = resolvedVoiceId;
+      updatePayload.voice_name =
+        voice_name !== undefined ? voice_name : agent.voice_name;
+    }
+
+    // smart_fields-only columns — no-op for classic agents
+    if (agent.field_mode === "smart_fields") {
+      if (smart_fields !== undefined) updatePayload.smart_fields = smart_fields;
+      if (first_message !== undefined)
+        updatePayload.first_message = first_message;
+    }
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, error: "No valid fields provided to update" });
+    }
+
+    const { data: updatedAgent, error: updateError } = await supabase
+      .from("agents")
+      .update(updatePayload)
+      .eq("agent_id", agent_id)
+      .select(
+        `*, agent_templates (name, slug, icon_url, config), knowledge_bases (id, name)`,
+      )
+      .single();
+
+    if (updateError) throw updateError;
+
+    return res.status(200).json({
+      success: true,
+      data: updatedAgent,
+      voice_import_warning: voiceImportWarning,
+    });
+  } catch (error) {
+    console.error("Error updating agent:", error);
     res.status(500).json({ success: false, error: error.message });
   }
 };

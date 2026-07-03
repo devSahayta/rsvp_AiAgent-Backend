@@ -24,6 +24,7 @@ import {
   formatCredits,
 } from "../config/creditPricing.js";
 import { getUserById, updateUserCredits } from "../models/userModel.js";
+import { dispatchEventFollowup } from "../utils/followupDispatcher.js";
 
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 import fetch from "node-fetch";
@@ -629,7 +630,9 @@ export const triggerBatchCall = async (req, res) => {
     // 3️⃣ Fetch agent row once — need first_message and elevenlabs_agent_id for recipients
     const { data: agentData, error: agentError } = await supabase
       .from("agents")
-      .select("elevenlabs_agent_id, first_message")
+      .select(
+        "elevenlabs_agent_id, first_message, voice_id, agent_name, voice_name",
+      )
       .eq("agent_id", eventData.agent_id)
       .single();
 
@@ -691,8 +694,13 @@ export const triggerBatchCall = async (req, res) => {
       // Smart fields: pass event_id + participant_id (snake_case) so the
       // ElevenLabs tool can include them in the POST body to /api/events/rsvp-responses.
       // Classic: keep original camelCase variables used by the fixed agent prompt.
+      const voiceName = agentData.voice_name
+        ? agentData.voice_name.split("-")[0].trim()
+        : null;
+
       const dynamic_variables = isSmartFields
         ? {
+            agent_name: String(voiceName || agentData.agent_name || "Agent"),
             event_id: String(eventId),
             event_name: String(eventData.event_name),
             participant_id: String(p.participant_id),
@@ -715,7 +723,7 @@ export const triggerBatchCall = async (req, res) => {
               language: null,
             },
             tts: {
-              voice_id: null,
+              voice_id: agentData.voice_id || null,
             },
           },
           dynamic_variables,
@@ -1299,6 +1307,8 @@ export const syncBatchStatuses = async (req, res) => {
 
         const existingLogId = logByParticipant[participantId];
 
+        let callLogId = existingLogId || null;
+
         if (existingLogId) {
           const { error: updateError } = await supabase
             .from("event_call_logs")
@@ -1311,7 +1321,7 @@ export const syncBatchStatuses = async (req, res) => {
 
           if (!updateError) updatedCount++;
         } else {
-          const { error: insertError } = await supabase
+          const { data: insertedLog, error: insertError } = await supabase
             .from("event_call_logs")
             .insert({
               event_id: eventId,
@@ -1319,9 +1329,34 @@ export const syncBatchStatuses = async (req, res) => {
               recipient_status: recipient.status,
               conversation_id: recipient.conversation_id || null,
               call_outcome: "pending",
-            });
+            })
+            .select("call_log_id")
+            .single();
 
-          if (!insertError) updatedCount++;
+          if (!insertError) {
+            updatedCount++;
+            callLogId = insertedLog?.call_log_id || null;
+          }
+        }
+
+        // "Unanswered" follow-up trigger — best-effort, never blocks the sync response.
+        const UNANSWERED_STATUSES = [
+          "initiated",
+          "no-answer",
+          "no_answer",
+          "failed",
+          "error",
+          "busy",
+        ];
+        if (callLogId && UNANSWERED_STATUSES.includes(recipient.status)) {
+          dispatchEventFollowup({
+            eventId,
+            participantId,
+            callLogId,
+            answered: false,
+          }).catch((err) =>
+            console.warn("Follow-up dispatch failed (non-fatal):", err.message),
+          );
         }
       }
     } else {

@@ -291,20 +291,100 @@ const ASSISTANT_TOOLS = [
     },
   },
 
-  // ── create_template — uncomment when your colleague finishes the Samvaadik API ──
-  // {
-  //   name: "create_template",
-  //   description: "Create a new WhatsApp message template in Samvaadik.",
-  //   input_schema: {
-  //     type: "object",
-  //     properties: {
-  //       name: { type: "string", description: "Template name (lowercase, underscores)" },
-  //       body: { type: "string", description: "The message body text" },
-  //       category: { type: "string", enum: ["MARKETING", "UTILITY", "AUTHENTICATION"] },
-  //     },
-  //     required: ["name", "body", "category"],
-  //   },
-  // },
+  // ── Template creation — multi-step guided flow ───────────────────────────────
+  {
+    name: "start_create_template",
+    description:
+      "Start the guided WhatsApp template creation flow. Use when the user wants to create a new WhatsApp message template via Samvaadik. Checks the Samvaadik connection first.",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "finalize_create_template",
+    description:
+      "Create the WhatsApp template once the user has confirmed all details in the summary. Only call this after the user explicitly approves the summary. For TEXT-only templates (no header_format, or header_format TEXT) this submits the template directly to Samvaadik. For media templates (header_format IMAGE/VIDEO/DOCUMENT) this instead starts the media upload flow — the result will ask the user to attach/confirm the media file before the template is actually submitted.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Template name — lowercase letters, numbers and underscores only, no spaces (e.g. 'promo_banner_1').",
+        },
+        category: {
+          type: "string",
+          enum: ["MARKETING", "UTILITY", "AUTHENTICATION"],
+          description: "Template category",
+        },
+        language: {
+          type: "string",
+          description: "Template language code. Defaults to 'en_US'.",
+        },
+        body_text: {
+          type: "string",
+          description:
+            "The message body. Use {{1}}, {{2}}, etc. for variables, e.g. 'Hi {{1}}, your order {{2}} is confirmed.'",
+        },
+        body_examples: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Example values for each {{n}} variable in body_text, in order. Required when body_text contains variables.",
+        },
+        header_format: {
+          type: "string",
+          enum: ["TEXT", "IMAGE", "VIDEO", "DOCUMENT"],
+          description:
+            "Optional header type. Omit entirely for a plain text-body template.",
+        },
+        header_text: {
+          type: "string",
+          description: "Header text. Required only when header_format is TEXT.",
+        },
+        file_name: {
+          type: "string",
+          description:
+            "Filename of the media the user attached. Required when header_format is IMAGE, VIDEO or DOCUMENT.",
+        },
+        file_type: {
+          type: "string",
+          description:
+            "MIME type of the attached media, e.g. 'image/jpeg', 'video/mp4'. Required when header_format is IMAGE, VIDEO or DOCUMENT.",
+        },
+        footer_text: {
+          type: "string",
+          description: "Optional small footer text shown below the body.",
+        },
+        buttons: {
+          type: "array",
+          description: "Optional buttons, max 3.",
+          items: {
+            type: "object",
+            properties: {
+              type: {
+                type: "string",
+                enum: ["QUICK_REPLY", "URL"],
+              },
+              text: { type: "string" },
+              url: {
+                type: "string",
+                description: "Required when type is URL. May include {{1}}.",
+              },
+              url_example: {
+                type: "string",
+                description:
+                  "Required when the url contains a {{1}} variable — a fully resolved example URL.",
+              },
+            },
+          },
+        },
+      },
+      required: ["name", "category", "language", "body_text"],
+    },
+  },
 ];
 
 export default ASSISTANT_TOOLS;

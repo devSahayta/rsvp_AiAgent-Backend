@@ -3,6 +3,7 @@ import {
   createKnowledgeBase,
   listKnowledgeBases,
   getKnowledgeBase,
+  updateKnowledgeBase,
   deleteKnowledgeBase,
   getKBContentForAgent,
 } from "../controllers/knowledgeBaseController.js";
@@ -21,6 +22,8 @@ router.get("/content", getKBContentForAgent);
 
 // Get knowledge base content
 router.get("/:id", getKnowledgeBase);
+
+router.put("/:id", updateKnowledgeBase);
 
 router.delete("/:id", deleteKnowledgeBase);
 

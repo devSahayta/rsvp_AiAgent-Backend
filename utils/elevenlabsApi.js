@@ -4,6 +4,7 @@ import axios from "axios";
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const BASE_URL = "https://api.elevenlabs.io/v1/convai";
+const ROOT_URL = "https://api.elevenlabs.io/v1";
 
 const headers = {
   "xi-api-key": ELEVENLABS_API_KEY,
@@ -85,6 +86,18 @@ export const deleteElevenLabsKB = async (kbId) => {
   return true;
 };
 
+// Import a public shared-library voice into our ElevenLabs account's voice
+// library. Required before that voice_id can be used in TTS/conversational
+// calls — shared-voices results are only browsable/previewable until added.
+export const addSharedVoice = async ({ publicOwnerId, voiceId, newName }) => {
+  const res = await axios.post(
+    `${ROOT_URL}/voices/add/${publicOwnerId}/${voiceId}`,
+    { new_name: newName },
+    { headers },
+  );
+  return res.data; // { voice_id }
+};
+
 // Get agent config
 export const getAgent = async (agentId) => {
   const res = await axios.get(`${BASE_URL}/agents/${agentId}`, { headers });
@@ -152,6 +165,7 @@ export const submitTestBatchCall = async ({
   agentPhoneNumberId,
   toNumber,
   dynamicVariables = {},
+  voiceId = null, // Optional: override agent's default voice
 }) => {
   try {
     console.log("📞 Initiating ElevenLabs TEST batch call...");
@@ -182,7 +196,7 @@ export const submitTestBatchCall = async ({
                 language: null,
               },
               tts: {
-                voice_id: null,
+                voice_id: voiceId,
               },
             },
             dynamic_variables: dynamicVariables,

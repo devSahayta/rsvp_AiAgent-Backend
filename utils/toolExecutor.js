@@ -11,6 +11,8 @@ import { supabase } from "../config/supabase.js";
 import {
   getTemplates,
   sendTemplate as samvaadikSendTemplate,
+  prepareMediaUpload,
+  createWhatsappTemplate,
 } from "../utils/samvaadikClient.js";
 
 /**
@@ -511,8 +513,158 @@ export async function executeToolCall(toolName, toolInput, userId) {
       };
     }
 
-    // ── create_template — uncomment when colleague's API is ready ──
-    // case "create_template": { ... }
+    // ── Template creation (Samvaadik) ───────────────────────────────────────────
+
+    case "start_create_template": {
+      const { data: conn } = await supabase
+        .from("samvaadik_connections")
+        .select("status")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle();
+
+      if (!conn) {
+        return {
+          success: true,
+          action_type: "redirect",
+          action_label: "Connect Samvaadik",
+          action_route: "/settings/samvaadik",
+          message: "not_connected",
+        };
+      }
+
+      return {
+        success: true,
+        action_type: "create_template_wizard",
+        steps: [
+          { step: 1, title: "Template Type", description: "Text-only or media (image/video/document) header" },
+          { step: 2, title: "Basic Info", description: "Name, category and language" },
+          { step: 3, title: "Body", description: "Message body text and variables" },
+          { step: 4, title: "Header / Media", description: "Optional header text, or attach image/video/document" },
+          { step: 5, title: "Footer & Buttons", description: "Optional footer text and up to 3 buttons" },
+          { step: 6, title: "Review & Create", description: "Confirm and submit to Meta for approval" },
+        ],
+        message: "wizard_started",
+      };
+    }
+
+    case "finalize_create_template": {
+      const {
+        name,
+        category,
+        language = "en_US",
+        body_text,
+        body_examples,
+        header_format,
+        header_text,
+        file_name,
+        file_type,
+        footer_text,
+        buttons,
+      } = toolInput;
+
+      const { data: conn } = await supabase
+        .from("samvaadik_connections")
+        .select("api_key, status")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle();
+
+      if (!conn) {
+        return {
+          success: false,
+          action_type: "redirect",
+          action_label: "Connect Samvaadik",
+          action_route: "/settings/samvaadik",
+          message:
+            "No active Samvaadik connection. Please connect your Samvaadik account first.",
+        };
+      }
+
+      const isMediaHeader = ["IMAGE", "VIDEO", "DOCUMENT"].includes(
+        header_format,
+      );
+
+      // ── Media template — Option A: signed-URL upload flow ────────────────
+      // We can't hold the file bytes here (same constraint as CSV uploads),
+      // so we only request the signed_url and hand it to the frontend. The
+      // frontend PUTs the bytes directly, then calls
+      // POST /api/samvaadik/templates/complete-media-upload to finish.
+      if (isMediaHeader) {
+        if (!file_name || !file_type) {
+          return {
+            success: false,
+            message: `Please attach the ${header_format.toLowerCase()} file for this template before I can continue.`,
+          };
+        }
+
+        const prepared = await prepareMediaUpload(conn.api_key, {
+          file_name,
+          file_type,
+        });
+        if (!prepared.success) {
+          return {
+            success: false,
+            message: "Failed to start the media upload with Samvaadik.",
+          };
+        }
+
+        return {
+          success: true,
+          action_type: "template_media_upload_required",
+          signed_url: prepared.signed_url,
+          storage_path: prepared.storage_path,
+          expires_in_seconds: prepared.expires_in_seconds,
+          file_name,
+          file_type,
+          template: {
+            name,
+            category,
+            language,
+            body_text,
+            body_examples: Array.isArray(body_examples) ? body_examples : [],
+            header_format,
+            footer_text: footer_text || null,
+            buttons: Array.isArray(buttons) ? buttons : [],
+          },
+          message:
+            "Media upload started. Once the file finishes uploading, the template will be submitted automatically.",
+        };
+      }
+
+      // ── Text-only template (no header, or header_format TEXT) ────────────
+      const payload = {
+        name,
+        category,
+        language,
+        body_text,
+        ...(Array.isArray(body_examples) &&
+          body_examples.length > 0 && { body_examples }),
+        ...(header_format === "TEXT" && {
+          header_format: "TEXT",
+          header_text,
+        }),
+        ...(footer_text && { footer_text }),
+        ...(Array.isArray(buttons) && buttons.length > 0 && { buttons }),
+      };
+
+      const result = await createWhatsappTemplate(conn.api_key, payload);
+      if (!result.success) {
+        return {
+          success: false,
+          message: `Failed to create template "${name}". Make sure the name is unique and all required fields are valid.`,
+        };
+      }
+
+      return {
+        success: true,
+        action_type: "template_created",
+        template: result.data,
+        message:
+          result.message ||
+          `Template "${name}" submitted to Meta for approval.`,
+      };
+    }
 
     // ── Agent creation tools ──────────────────────────────────────────────────
 

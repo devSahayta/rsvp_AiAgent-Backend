@@ -59,10 +59,10 @@ app.use("/api/credits", creditRoutes);
 app.use("/", whatsappRoutes);
 app.use("/api", chatRoutes);
 app.use("/api", travelItineraryRoutes);
-app.use("/api/waccount", waccountRoutes);
+// app.use("/api/waccount", waccountRoutes);
 
-//route for whatapp template
-app.use("/api/watemplates", whatsappTemplateRoutes);
+// //route for whatapp template
+// app.use("/api/watemplates", whatsappTemplateRoutes);
 
 //route for knowledge base
 app.use("/api/knowledge-bases", knowledgeBaseRoutes);

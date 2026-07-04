@@ -59,10 +59,6 @@ export const dispatchEventFollowup = async ({
   try {
     if (!eventId || !participantId || !callLogId) return;
 
-    console.log(
-      `[followupDispatcher] dispatchEventFollowup: eventId=${eventId}, participantId=${participantId}, callLogId=${callLogId}, answered=${answered}`,
-    );
-
     const { data: rule } = await supabase
       .from("event_followup_rules")
       .select("*")
@@ -121,12 +117,6 @@ export const dispatchEventFollowup = async ({
 
     if (dispatchErr) throw dispatchErr;
 
-    console.log(
-      `[followupDispatcher] dispatchEventFollowup: scheduling follow-up for participant ${participantId} at ${scheduledAt}`,
-    );
-
-    console.log({ dispatch, resolvedVariables, scheduledAt });
-
     const { data: conn } = await supabase
       .from("samvaadik_connections")
       .select("api_key, status")
@@ -153,8 +143,6 @@ export const dispatchEventFollowup = async ({
         template_variables: resolvedVariables,
         media_id: rule.media_id || undefined,
       });
-
-      console.log({ result });
 
       await supabase
         .from("event_followup_dispatches")

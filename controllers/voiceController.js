@@ -11,15 +11,31 @@ export const getIndianVoices = async (req, res) => {
     const { gender, use_case, page_size = 30, page, search } = req.query;
 
     const params = new URLSearchParams({
-      language: "en",
-      locale: "en-IN", // Indian English
       page_size: String(page_size),
     });
 
+    // When searching by name, don't lock to a locale — the search term
+    // itself narrows results, and locale filtering excludes valid Indian
+    // voices that have hi-IN, null, or other Indian locales.
+    if (search) {
+      // Free-text search: let ElevenLabs match by name across all locales.
+      // Add a broad language hint but no locale restriction.
+      params.append("search", search);
+      // Still filter by language=en so we don't get pure foreign language voices,
+      // but don't append locale so Indian-named voices aren't excluded.
+      // Actually for search, don't even lock language — "Sai" voices might be hi/te/ta
+
+      // Page works for search too
+      if (page && page !== "1") params.append("page", page);
+    } else {
+      // No search: use locale to surface Indian-English voices specifically
+      params.append("language", "en");
+      params.append("locale", "en-IN");
+      if (page) params.append("page", page);
+    }
+
     if (gender) params.append("gender", gender);
-    if (use_case) params.append("use_case", use_case);
-    if (search) params.append("search", search);
-    if (page) params.append("page", page);
+    if (use_case) params.append("use_cases", use_case);
 
     const response = await fetch(
       `${ELEVENLABS_API_URL}/shared-voices?${params.toString()}`,

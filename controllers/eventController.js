@@ -1147,8 +1147,13 @@ export const retryBatchCallSelected = async (req, res) => {
         formattedPhone = "+" + formattedPhone;
       }
 
+      const voiceName = agentData.voice_name
+        ? agentData.voice_name.split("-")[0].trim()
+        : null;
+
       const dynamic_variables = isSmartFields
         ? {
+            agent_name: String(voiceName || agentData.agent_name || "Agent"),
             event_id: String(eventId),
             event_name: String(eventData.event_name),
             participant_id: String(p.participant_id),
@@ -1170,7 +1175,7 @@ export const retryBatchCallSelected = async (req, res) => {
               first_message: agentFirstMessage,
               language: null,
             },
-            tts: { voice_id: null },
+            tts: { voice_id: agentData.voice_id || null },
           },
           dynamic_variables,
         },

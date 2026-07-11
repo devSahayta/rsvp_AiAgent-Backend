@@ -45,6 +45,12 @@ export const duplicateAgentForEvent = async (req, res) => {
     }));
 
     // 4️⃣ Inject KB into full config
+    // GET/duplicate responses include both the legacy inline `tools` array
+    // and the newer `tool_ids` references for the same tools. Echoing both
+    // back on PATCH is rejected ("Cannot specify both tools and tool IDs") —
+    // drop the legacy inline array and keep `tool_ids`.
+    const { tools: _tools, ...promptWithoutTools } =
+      duplicated.conversation_config.agent.prompt;
     const updatedPayload = {
       ...duplicated,
       conversation_config: {
@@ -52,7 +58,7 @@ export const duplicateAgentForEvent = async (req, res) => {
         agent: {
           ...duplicated.conversation_config.agent,
           prompt: {
-            ...duplicated.conversation_config.agent.prompt,
+            ...promptWithoutTools,
             knowledge_base,
           },
         },
@@ -91,6 +97,10 @@ export const updateAgentKnowledgeBase = async (req, res) => {
 
     const agent = await getAgent(agentId);
 
+    // See duplicateAgentForEvent() above — PATCH rejects having both `tools`
+    // and `tool_ids` set, so drop the legacy inline array.
+    const { tools: _tools, ...promptWithoutTools } =
+      agent.conversation_config.agent.prompt;
     const updatedPayload = {
       ...agent,
       conversation_config: {
@@ -98,7 +108,7 @@ export const updateAgentKnowledgeBase = async (req, res) => {
         agent: {
           ...agent.conversation_config.agent,
           prompt: {
-            ...agent.conversation_config.agent.prompt,
+            ...promptWithoutTools,
             knowledge_base,
           },
         },

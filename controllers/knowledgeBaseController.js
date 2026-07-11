@@ -197,6 +197,9 @@ export const updateKnowledgeBase = async (req, res) => {
         if (!linkedAgent.elevenlabs_agent_id) continue;
         try {
           const agentConfig = await getAgent(linkedAgent.elevenlabs_agent_id);
+          // GET returns both legacy inline `tools` and `tool_ids`; PATCH
+          // rejects having both (see agentSystemController.js createAgent()).
+          delete agentConfig.conversation_config.agent.prompt.tools;
           agentConfig.conversation_config.agent.prompt.knowledge_base = [
             { type: "text", id: elevenlabs_kb_id, name, usage_mode: "auto" },
           ];

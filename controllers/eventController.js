@@ -1241,6 +1241,230 @@ export const retryBatchCallSelected = async (req, res) => {
   }
 };
 
+export const startBatchCallSelected = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { participant_ids } = req.body;
+
+    if (!participant_ids?.length) {
+      return res
+        .status(400)
+        .json({ error: "participant_ids array is required" });
+    }
+
+    // 1️⃣ Fetch event details
+    const { data: eventData, error: eventError } = await supabase
+      .from("events")
+      .select("*")
+      .eq("event_id", eventId)
+      .single();
+
+    if (eventError || !eventData) {
+      return res.status(404).json({ error: "Event not found" });
+    }
+
+    const user_id = eventData.user_id;
+
+    // 2️⃣ Fetch only the selected participants
+    const { data: participants, error: participantError } = await supabase
+      .from("participants")
+      .select("participant_id, full_name, phone_number, event_id")
+      .eq("event_id", eventId)
+      .in("participant_id", participant_ids);
+
+    if (participantError) throw participantError;
+
+    if (!participants || participants.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "None of the selected participants found" });
+    }
+
+    console.log(
+      `📞 Starting batch call for ${participants.length} selected participant(s) in event ${eventId}`,
+    );
+
+    // ── Credit check (same pattern as triggerBatchCall) ──────────────────
+    const user = await getUserById(user_id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const ESTIMATED_MINUTES_PER_CALL = 3;
+    const totalEstimatedMinutes =
+      participants.length * ESTIMATED_MINUTES_PER_CALL;
+    const estimatedCredits =
+      totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+    if (user.credits < estimatedCredits) {
+      return res.status(402).json({
+        error: "Insufficient credits to retry selected participants",
+        current_balance: formatCredits(user.credits),
+        estimated_credits: formatCredits(estimatedCredits),
+        shortfall: formatCredits(estimatedCredits - user.credits),
+        participants_count: participants.length,
+      });
+    }
+
+    // 3️⃣ Fetch agent details (same as triggerBatchCall)
+    const { data: agentData, error: agentError } = await supabase
+      .from("agents")
+      .select("elevenlabs_agent_id, first_message")
+      .eq("agent_id", eventData.agent_id)
+      .single();
+
+    if (agentError || !agentData?.elevenlabs_agent_id) {
+      return res
+        .status(400)
+        .json({ error: "ElevenLabs agent not configured properly" });
+    }
+
+    const elevenAgentId = agentData.elevenlabs_agent_id;
+    const agentFirstMessage = agentData.first_message || null;
+    const isSmartFields = eventData.field_mode === "smart_fields";
+
+    // ── Smart fields question block (same as triggerBatchCall) ───────────
+    let smart_fields_block = "";
+    if (isSmartFields) {
+      const { data: smartFields } = await supabase
+        .from("event_smart_fields")
+        .select(
+          "field_key, field_label, field_type, ai_question, options, display_order",
+        )
+        .eq("event_id", eventId)
+        .order("display_order", { ascending: true });
+
+      if (smartFields && smartFields.length > 0) {
+        smart_fields_block = smartFields
+          .map((f, i) => {
+            let typeLine = `Type: ${f.field_type}`;
+            if (
+              f.field_type === "choice" &&
+              Array.isArray(f.options) &&
+              f.options.length
+            ) {
+              typeLine += ` | Options: ${f.options.join(", ")}`;
+            }
+            return `${i + 1}. Ask: "${f.ai_question}"\n   field_key: ${f.field_key}\n   ${typeLine}`;
+          })
+          .join("\n\n");
+      }
+    }
+
+    // 4️⃣ Build recipients (same shape as triggerBatchCall)
+    const recipients = participants.map((p) => {
+      let formattedPhone = String(p.phone_number || "").trim();
+      if (formattedPhone && !formattedPhone.startsWith("+")) {
+        formattedPhone = "+" + formattedPhone;
+      }
+
+      const voiceName = agentData.voice_name
+        ? agentData.voice_name.split("-")[0].trim()
+        : null;
+
+      const dynamic_variables = isSmartFields
+        ? {
+            agent_name: String(voiceName || agentData.agent_name || "Agent"),
+            event_id: String(eventId),
+            event_name: String(eventData.event_name),
+            participant_id: String(p.participant_id),
+            guest_name: String(p.full_name),
+            knowledge_base_id: String(eventData.knowledge_base_id),
+            smart_fields_block,
+          }
+        : {
+            eventId: String(eventId),
+            eventName: String(eventData.event_name),
+          };
+
+      return {
+        id: String(p.participant_id),
+        conversation_initiation_client_data: {
+          conversation_config_override: {
+            agent: {
+              prompt: null,
+              first_message: agentFirstMessage,
+              language: null,
+            },
+            tts: { voice_id: agentData.voice_id || null },
+          },
+          dynamic_variables,
+        },
+        phone_number: formattedPhone,
+      };
+    });
+
+    const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+
+    const payload = {
+      call_name: `event-${eventId}-start-batch-selected-${Date.now()}`,
+      agent_id: elevenAgentId,
+      agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+      whatsapp_params: null,
+      recipients,
+      scheduled_time_unix: scheduledUnix,
+    };
+
+    // 5️⃣ Submit to ElevenLabs
+    const response = await fetch(
+      "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      },
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("❌ ElevenLabs start-batch-selected error:", data);
+      return res
+        .status(500)
+        .json({ error: "Start batch call failed", details: data });
+    }
+
+    console.log(
+      `✅ Batch call started for selection: ${data.id} (${participants.length} participants)`,
+    );
+
+    // 6️⃣ Reset call_status to pending for these participants so the table
+    //     correctly shows them as "in progress" again
+    await supabase
+      .from("conversation_results")
+      .update({
+        call_status: "pending",
+        last_updated: new Date().toISOString(),
+      })
+      .in("participant_id", participant_ids);
+
+    //update event with new batch_id and status
+    await supabase
+      .from("events")
+      .update({
+        batch_id: data.id,
+        batch_status: data.status || "pending",
+      })
+      .eq("event_id", eventId);
+
+    return res.status(200).json({
+      message: `✅ Batch call started for ${participants.length} selected participant(s)`,
+      batch: data,
+      participants_count: participants.length,
+      credit_info: {
+        estimated_credits: formatCredits(estimatedCredits),
+        current_balance: formatCredits(user.credits),
+      },
+    });
+  } catch (err) {
+    console.error("startBatchCallSelected error:", err);
+    return res
+      .status(500)
+      .json({ error: "Failed to start batch call for selected participants" });
+  }
+};
+
 // export const retryBatchCallSelected = async (req, res) => {
 //   try {
 //     const { eventId } = req.params;
@@ -2158,13 +2382,18 @@ export const getEventActivityStatus = async (req, res) => {
     // ── Check call batch status ──────────────────────────────────────────
     const { data: event } = await supabase
       .from("events")
-      .select("batch_status")
+      .select("batch_id, batch_status")
       .eq("event_id", eventId)
       .maybeSingle();
 
+    // batch_status defaults to 'pending' on every event row even when no
+    // batch has ever been dispatched, so only treat 'pending'/'in_progress'
+    // as "active" once a batch actually exists (batch_id gets set when a
+    // batch is created).
     const callBatchActive =
-      event?.batch_status === "in_progress" ||
-      event?.batch_status === "pending";
+      !!event?.batch_id &&
+      (event?.batch_status === "in_progress" ||
+        event?.batch_status === "pending");
 
     // ── Check recent WhatsApp batch sends ────────────────────────────────
     // A WhatsApp batch is considered "active" if any session for this event

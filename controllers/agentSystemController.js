@@ -238,6 +238,12 @@ export const createAgent = async (req, res) => {
       //2) Get duplicated agent config
       const agentConfig = await getAgent(duplicatedAgent.agent_id);
 
+      // ElevenLabs' GET response includes both the legacy inline `tools` array
+      // and the newer `tool_ids` references for the same tools. Echoing both
+      // back on PATCH is rejected ("Cannot specify both tools and tool IDs") —
+      // drop the legacy inline array and keep `tool_ids`.
+      delete agentConfig.conversation_config.agent.prompt.tools;
+
       //3) Inject TEXT knowledge base into duplicated ElevenLabs agent config (classic mode uses TEXT KB only)
       agentConfig.conversation_config.agent.prompt.knowledge_base = [
         {
@@ -351,8 +357,15 @@ export const createAgent = async (req, res) => {
       .status(201)
       .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
   } catch (error) {
-    console.error("Error creating agent:", error);
-    res.status(500).json({ success: false, error: error.message });
+    const elevenLabsDetail = error.response?.data;
+    console.error(
+      "Error creating agent:",
+      elevenLabsDetail ? JSON.stringify(elevenLabsDetail, null, 2) : error.message,
+    );
+    res.status(500).json({
+      success: false,
+      error: elevenLabsDetail?.detail?.message || error.message,
+    });
   }
 };
 
@@ -473,6 +486,10 @@ export const updateAgentDetails = async (req, res) => {
     if (agent.field_mode === "classic" && (kbChanged || voiceChanged)) {
       const agentConfig = await getAgent(agent.elevenlabs_agent_id);
 
+      // See createAgent() — GET returns both legacy inline `tools` and the
+      // newer `tool_ids`; PATCH rejects having both.
+      delete agentConfig.conversation_config.agent.prompt.tools;
+
       if (kbChanged) {
         agentConfig.conversation_config.agent.prompt.knowledge_base = [
           {
@@ -537,8 +554,15 @@ export const updateAgentDetails = async (req, res) => {
       voice_import_warning: voiceImportWarning,
     });
   } catch (error) {
-    console.error("Error updating agent:", error);
-    res.status(500).json({ success: false, error: error.message });
+    const elevenLabsDetail = error.response?.data;
+    console.error(
+      "Error updating agent:",
+      elevenLabsDetail ? JSON.stringify(elevenLabsDetail, null, 2) : error.message,
+    );
+    res.status(500).json({
+      success: false,
+      error: elevenLabsDetail?.detail?.message || error.message,
+    });
   }
 };
 

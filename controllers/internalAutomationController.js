@@ -52,6 +52,7 @@ export const runAutomationById = async (req, res) => {
             targetIds,
             automation.template_id, // stores template_name — see note in createAutomation
             automation.template_language || "en",
+            automation.template_body || null,
           );
         }
         result.succeeded = targetIds.length;

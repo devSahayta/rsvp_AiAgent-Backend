@@ -1724,6 +1724,7 @@ export async function sendSamvaadikTemplateToParticipants(
   participantIds,
   templateName,
   languageCode = "en",
+  templateBodyText = null,
 ) {
   if (!eventId || !templateName) {
     throw new Error("eventId and templateName are required");
@@ -1802,10 +1803,18 @@ export async function sendSamvaadikTemplateToParticipants(
         person_name: name,
         user_id: event.user_id,
       });
+
+      // Render the real message content the participant actually received,
+      // not a placeholder — {{1}} is the only variable we currently send
+      // (the participant's name, matching the `components` payload above).
+      const renderedMessage = templateBodyText
+        ? templateBodyText.replace(/\{\{\s*1\s*\}\}/g, name)
+        : `[Template: ${templateName}] Sent to ${name}`; // fallback if body text wasn't supplied
+
       await chatCtrl.saveMessage({
         chat_id: chat.chat_id,
         sender_type: "ai",
-        message: `[Template: ${templateName}] Sent to ${name}`,
+        message: renderedMessage,
         message_type: "template",
         media_path: null,
       });
@@ -1827,6 +1836,11 @@ export async function sendSamvaadikTemplateToParticipants(
   return { total: targets.length, ...results };
 }
 
+// Local to this file — deliberately NOT part of chatController.js's
+// ensureChat, which other flows (webhook replies, classic call flow) rely
+// on with different semantics. One WhatsApp thread per phone number: if a
+// chat already exists for this phone, repoint it at the current event
+// instead of creating a second row for the same contact.
 // Local to this file — deliberately NOT part of chatController.js's
 // ensureChat, which other flows (webhook replies, classic call flow) rely
 // on with different semantics. One WhatsApp thread per phone number: if a
@@ -1886,6 +1900,7 @@ export const sendSamvaadikBatch = async (req, res) => {
       event_id,
       template_name,
       language_code = "en",
+      template_body = null,
       participant_ids,
     } = req.body;
     if (!event_id || !template_name) {
@@ -1898,6 +1913,7 @@ export const sendSamvaadikBatch = async (req, res) => {
       participant_ids,
       template_name,
       language_code,
+      template_body,
     );
     return res.json({
       success: true,

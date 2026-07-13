@@ -22,7 +22,7 @@ import {
   deleteParticipants,
   createParticipant,
   getEventActivityStatus,
-  retryBatchCallSelected, // ← NEW
+  startBatchCallSelected,
 } from "../controllers/eventController.js";
 
 import { authenticateUser } from "../middleware/authMiddleware.js";
@@ -70,7 +70,7 @@ router.get("/:eventId", getEventById);
 // Batch operations
 router.post("/:eventId/call-batch", triggerBatchCall);
 router.post("/:eventId/retry-batch", retryBatchCall);
-router.post("/:eventId/retry-batch-selected", retryBatchCallSelected); // ← NEW
+router.post("/:eventId/start-batch-selected", startBatchCallSelected);
 router.post("/:eventId/sync-batch-status", syncBatchStatuses);
 router.get("/:eventId/batch-status", getBatchStatus);
 

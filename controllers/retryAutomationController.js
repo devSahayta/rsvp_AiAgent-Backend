@@ -86,6 +86,7 @@ export const createAutomation = async (req, res) => {
       max_attempts_per_participant = 1,
       template_id, // holds the Samvaadik template_name, column kept generic
       template_language = "en",
+      template_body = null,
     } = req.body;
 
     if (!["call", "whatsapp"].includes(mode)) {
@@ -151,6 +152,7 @@ export const createAutomation = async (req, res) => {
         max_attempts_per_participant,
         template_id: template_id || null,
         template_language: mode === "whatsapp" ? template_language : null,
+        template_body: mode === "whatsapp" ? template_body : null,
         created_by: req.user?.id || req.user?.user_id || null,
         status: "scheduled",
       })

@@ -1032,7 +1032,7 @@ export const retryBatchCall = async (req, res) => {
   }
 };
 
-export const retryBatchCallSelected = async (req, res) => {
+export const startBatchCallSelected = async (req, res) => {
   try {
     const { eventId } = req.params;
     const { participant_ids } = req.body;
@@ -1072,7 +1072,7 @@ export const retryBatchCallSelected = async (req, res) => {
     }
 
     console.log(
-      `🔁 Retrying ${participants.length} selected participant(s) for event ${eventId}`,
+      `📞 Starting batch call for ${participants.length} selected participant(s) in event ${eventId}`,
     );
 
     // ── Credit check (same pattern as triggerBatchCall) ──────────────────
@@ -1186,7 +1186,7 @@ export const retryBatchCallSelected = async (req, res) => {
     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
 
     const payload = {
-      call_name: `event-${eventId}-retry-selected-${Date.now()}`,
+      call_name: `event-${eventId}-start-batch-selected-${Date.now()}`,
       agent_id: elevenAgentId,
       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
       whatsapp_params: null,
@@ -1210,14 +1210,14 @@ export const retryBatchCallSelected = async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error("❌ ElevenLabs retry-selected error:", data);
+      console.error("❌ ElevenLabs start-batch-selected error:", data);
       return res
         .status(500)
-        .json({ error: "Retry call failed", details: data });
+        .json({ error: "Start batch call failed", details: data });
     }
 
     console.log(
-      `✅ Selected retry batch created: ${data.id} (${participants.length} participants)`,
+      `✅ Batch call started for selection: ${data.id} (${participants.length} participants)`,
     );
 
     // 6️⃣ Reset call_status to pending for these participants so the table
@@ -1230,8 +1230,17 @@ export const retryBatchCallSelected = async (req, res) => {
       })
       .in("participant_id", participant_ids);
 
+    //update event with new batch_id and status
+    await supabase
+      .from("events")
+      .update({
+        batch_id: data.id,
+        batch_status: data.status || "pending",
+      })
+      .eq("event_id", eventId);
+
     return res.status(200).json({
-      message: `✅ Retry started for ${participants.length} selected participant(s)`,
+      message: `✅ Batch call started for ${participants.length} selected participant(s)`,
       batch: data,
       participants_count: participants.length,
       credit_info: {
@@ -1240,10 +1249,10 @@ export const retryBatchCallSelected = async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("retryBatchCallSelected error:", err);
+    console.error("startBatchCallSelected error:", err);
     return res
       .status(500)
-      .json({ error: "Failed to retry selected participants" });
+      .json({ error: "Failed to start batch call for selected participants" });
   }
 };
 
@@ -1953,13 +1962,18 @@ export const getEventActivityStatus = async (req, res) => {
     // ── Check call batch status ──────────────────────────────────────────
     const { data: event } = await supabase
       .from("events")
-      .select("batch_status")
+      .select("batch_id, batch_status")
       .eq("event_id", eventId)
       .maybeSingle();
 
+    // batch_status defaults to 'pending' on every event row even when no
+    // batch has ever been dispatched, so only treat 'pending'/'in_progress'
+    // as "active" once a batch actually exists (batch_id gets set when a
+    // batch is created).
     const callBatchActive =
-      event?.batch_status === "in_progress" ||
-      event?.batch_status === "pending";
+      !!event?.batch_id &&
+      (event?.batch_status === "in_progress" ||
+        event?.batch_status === "pending");
 
     // ── Check recent WhatsApp batch sends ────────────────────────────────
     // A WhatsApp batch is considered "active" if any session for this event

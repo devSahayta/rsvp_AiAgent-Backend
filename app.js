@@ -26,6 +26,9 @@ import assistantRoutes from "./routes/assistantRoutes.js";
 import voiceRoutes from "./routes/voiceRoutes.js";
 
 import samvaadikRoutes from "./routes/samvaadikRoutes.js";
+import retryAutomationRoutes from "./routes/retryAutomationRoutes.js";
+import internalRoutes from "./routes/internalRoutes.js";
+
 dotenv.config();
 startVoiceTestSyncCron();
 startProductionBatchSyncCron();
@@ -88,6 +91,15 @@ app.use("/api/samvaadik", samvaadikRoutes);
 app.use("/api/assistant", assistantRoutes);
 
 app.get("/", (req, res) => res.send("API is running..."));
+
+app.use(
+  "/api/events/:eventId/retry-automations",
+  authenticateUser,
+  retryAutomationRoutes,
+);
+
+// scheduler-only, guarded by internalAuth (its own secret, no Kinde)
+app.use("/internal", internalRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));

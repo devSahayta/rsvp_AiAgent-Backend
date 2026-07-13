@@ -1032,404 +1032,614 @@ export const retryBatchCall = async (req, res) => {
   }
 };
 
+export async function retryCallsForParticipants(eventId, participantIds) {
+  if (!participantIds?.length) {
+    throw new Error("participant_ids array is required");
+  }
+
+  const { data: eventData, error: eventError } = await supabase
+    .from("events")
+    .select("*")
+    .eq("event_id", eventId)
+    .single();
+  if (eventError || !eventData) throw new Error("Event not found");
+
+  const user_id = eventData.user_id;
+
+  const { data: participants, error: participantError } = await supabase
+    .from("participants")
+    .select("participant_id, full_name, phone_number, event_id")
+    .eq("event_id", eventId)
+    .in("participant_id", participantIds);
+  if (participantError) throw participantError;
+  if (!participants || participants.length === 0) {
+    throw new Error("None of the selected participants found");
+  }
+
+  console.log(
+    `🔁 Retrying ${participants.length} selected participant(s) for event ${eventId}`,
+  );
+
+  const user = await getUserById(user_id);
+  if (!user) throw new Error("User not found");
+
+  const ESTIMATED_MINUTES_PER_CALL = 3;
+  const totalEstimatedMinutes =
+    participants.length * ESTIMATED_MINUTES_PER_CALL;
+  const estimatedCredits =
+    totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+  if (user.credits < estimatedCredits) {
+    const err = new Error(
+      "Insufficient credits to retry selected participants",
+    );
+    err.statusCode = 402;
+    err.details = {
+      current_balance: formatCredits(user.credits),
+      estimated_credits: formatCredits(estimatedCredits),
+      shortfall: formatCredits(estimatedCredits - user.credits),
+      participants_count: participants.length,
+    };
+    throw err;
+  }
+
+  const { data: agentData, error: agentError } = await supabase
+    .from("agents")
+    .select("elevenlabs_agent_id, first_message")
+    .eq("agent_id", eventData.agent_id)
+    .single();
+  if (agentError || !agentData?.elevenlabs_agent_id) {
+    throw new Error("ElevenLabs agent not configured properly");
+  }
+
+  const elevenAgentId = agentData.elevenlabs_agent_id;
+  const agentFirstMessage = agentData.first_message || null;
+  const isSmartFields = eventData.field_mode === "smart_fields";
+
+  let smart_fields_block = "";
+  if (isSmartFields) {
+    const { data: smartFields } = await supabase
+      .from("event_smart_fields")
+      .select(
+        "field_key, field_label, field_type, ai_question, options, display_order",
+      )
+      .eq("event_id", eventId)
+      .order("display_order", { ascending: true });
+
+    if (smartFields && smartFields.length > 0) {
+      smart_fields_block = smartFields
+        .map((f, i) => {
+          let typeLine = `Type: ${f.field_type}`;
+          if (
+            f.field_type === "choice" &&
+            Array.isArray(f.options) &&
+            f.options.length
+          ) {
+            typeLine += ` | Options: ${f.options.join(", ")}`;
+          }
+          return `${i + 1}. Ask: "${f.ai_question}"\n   field_key: ${f.field_key}\n   ${typeLine}`;
+        })
+        .join("\n\n");
+    }
+  }
+
+  const recipients = participants.map((p) => {
+    let formattedPhone = String(p.phone_number || "").trim();
+    if (formattedPhone && !formattedPhone.startsWith("+"))
+      formattedPhone = "+" + formattedPhone;
+
+    const dynamic_variables = isSmartFields
+      ? {
+          event_id: String(eventId),
+          event_name: String(eventData.event_name),
+          participant_id: String(p.participant_id),
+          guest_name: String(p.full_name),
+          knowledge_base_id: String(eventData.knowledge_base_id),
+          smart_fields_block,
+        }
+      : {
+          eventId: String(eventId),
+          eventName: String(eventData.event_name),
+        };
+
+    return {
+      id: String(p.participant_id),
+      conversation_initiation_client_data: {
+        conversation_config_override: {
+          agent: {
+            prompt: null,
+            first_message: agentFirstMessage,
+            language: null,
+          },
+          tts: { voice_id: null },
+        },
+        dynamic_variables,
+      },
+      phone_number: formattedPhone,
+    };
+  });
+
+  const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+  const payload = {
+    call_name: `event-${eventId}-retry-selected-${Date.now()}`,
+    agent_id: elevenAgentId,
+    agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+    whatsapp_params: null,
+    recipients,
+    scheduled_time_unix: scheduledUnix,
+  };
+
+  const response = await fetch(
+    "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+    {
+      method: "POST",
+      headers: {
+        "xi-api-key": process.env.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+  const data = await response.json();
+
+  if (!response.ok) {
+    console.error("❌ ElevenLabs retry-selected error:", data);
+    const err = new Error("Retry call failed");
+    err.details = data;
+    throw err;
+  }
+
+  console.log(
+    `✅ Selected retry batch created: ${data.id} (${participants.length} participants)`,
+  );
+
+  // Point the event at the NEW batch, same as retryBatchCall (full retry)
+  // already does — without this, batch_status/batch_id never change and
+  // no sync (cron, manual, or automation) can ever see this retry's outcome.
+  await supabase
+    .from("events")
+    .update({
+      batch_id: data.id,
+      batch_status: data.status || "retrying",
+      batch_created_at: new Date().toISOString(),
+      credits_deducted: null,
+      total_call_duration: null,
+      successful_calls: null,
+    })
+    .eq("event_id", eventId);
+
+  await supabase
+    .from("conversation_results")
+    .update({ call_status: "pending", last_updated: new Date().toISOString() })
+    .in("participant_id", participantIds);
+
+  return {
+    batch: data,
+    participants_count: participants.length,
+    credit_info: {
+      estimated_credits: formatCredits(estimatedCredits),
+      current_balance: formatCredits(user.credits),
+    },
+  };
+}
+
 export const retryBatchCallSelected = async (req, res) => {
   try {
     const { eventId } = req.params;
     const { participant_ids } = req.body;
-
-    if (!participant_ids?.length) {
-      return res
-        .status(400)
-        .json({ error: "participant_ids array is required" });
-    }
-
-    // 1️⃣ Fetch event details
-    const { data: eventData, error: eventError } = await supabase
-      .from("events")
-      .select("*")
-      .eq("event_id", eventId)
-      .single();
-
-    if (eventError || !eventData) {
-      return res.status(404).json({ error: "Event not found" });
-    }
-
-    const user_id = eventData.user_id;
-
-    // 2️⃣ Fetch only the selected participants
-    const { data: participants, error: participantError } = await supabase
-      .from("participants")
-      .select("participant_id, full_name, phone_number, event_id")
-      .eq("event_id", eventId)
-      .in("participant_id", participant_ids);
-
-    if (participantError) throw participantError;
-
-    if (!participants || participants.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "None of the selected participants found" });
-    }
-
-    console.log(
-      `🔁 Retrying ${participants.length} selected participant(s) for event ${eventId}`,
-    );
-
-    // ── Credit check (same pattern as triggerBatchCall) ──────────────────
-    const user = await getUserById(user_id);
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    const ESTIMATED_MINUTES_PER_CALL = 3;
-    const totalEstimatedMinutes =
-      participants.length * ESTIMATED_MINUTES_PER_CALL;
-    const estimatedCredits =
-      totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
-
-    if (user.credits < estimatedCredits) {
-      return res.status(402).json({
-        error: "Insufficient credits to retry selected participants",
-        current_balance: formatCredits(user.credits),
-        estimated_credits: formatCredits(estimatedCredits),
-        shortfall: formatCredits(estimatedCredits - user.credits),
-        participants_count: participants.length,
-      });
-    }
-
-    // 3️⃣ Fetch agent details (same as triggerBatchCall)
-    const { data: agentData, error: agentError } = await supabase
-      .from("agents")
-      .select("elevenlabs_agent_id, first_message")
-      .eq("agent_id", eventData.agent_id)
-      .single();
-
-    if (agentError || !agentData?.elevenlabs_agent_id) {
-      return res
-        .status(400)
-        .json({ error: "ElevenLabs agent not configured properly" });
-    }
-
-    const elevenAgentId = agentData.elevenlabs_agent_id;
-    const agentFirstMessage = agentData.first_message || null;
-    const isSmartFields = eventData.field_mode === "smart_fields";
-
-    // ── Smart fields question block (same as triggerBatchCall) ───────────
-    let smart_fields_block = "";
-    if (isSmartFields) {
-      const { data: smartFields } = await supabase
-        .from("event_smart_fields")
-        .select(
-          "field_key, field_label, field_type, ai_question, options, display_order",
-        )
-        .eq("event_id", eventId)
-        .order("display_order", { ascending: true });
-
-      if (smartFields && smartFields.length > 0) {
-        smart_fields_block = smartFields
-          .map((f, i) => {
-            let typeLine = `Type: ${f.field_type}`;
-            if (
-              f.field_type === "choice" &&
-              Array.isArray(f.options) &&
-              f.options.length
-            ) {
-              typeLine += ` | Options: ${f.options.join(", ")}`;
-            }
-            return `${i + 1}. Ask: "${f.ai_question}"\n   field_key: ${f.field_key}\n   ${typeLine}`;
-          })
-          .join("\n\n");
-      }
-    }
-
-    // 4️⃣ Build recipients (same shape as triggerBatchCall)
-    const recipients = participants.map((p) => {
-      let formattedPhone = String(p.phone_number || "").trim();
-      if (formattedPhone && !formattedPhone.startsWith("+")) {
-        formattedPhone = "+" + formattedPhone;
-      }
-
-      const dynamic_variables = isSmartFields
-        ? {
-            event_id: String(eventId),
-            event_name: String(eventData.event_name),
-            participant_id: String(p.participant_id),
-            guest_name: String(p.full_name),
-            knowledge_base_id: String(eventData.knowledge_base_id),
-            smart_fields_block,
-          }
-        : {
-            eventId: String(eventId),
-            eventName: String(eventData.event_name),
-          };
-
-      return {
-        id: String(p.participant_id),
-        conversation_initiation_client_data: {
-          conversation_config_override: {
-            agent: {
-              prompt: null,
-              first_message: agentFirstMessage,
-              language: null,
-            },
-            tts: { voice_id: null },
-          },
-          dynamic_variables,
-        },
-        phone_number: formattedPhone,
-      };
-    });
-
-    const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
-
-    const payload = {
-      call_name: `event-${eventId}-retry-selected-${Date.now()}`,
-      agent_id: elevenAgentId,
-      agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
-      whatsapp_params: null,
-      recipients,
-      scheduled_time_unix: scheduledUnix,
-    };
-
-    // 5️⃣ Submit to ElevenLabs
-    const response = await fetch(
-      "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
-      {
-        method: "POST",
-        headers: {
-          "xi-api-key": process.env.ELEVENLABS_API_KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      },
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      console.error("❌ ElevenLabs retry-selected error:", data);
-      return res
-        .status(500)
-        .json({ error: "Retry call failed", details: data });
-    }
-
-    console.log(
-      `✅ Selected retry batch created: ${data.id} (${participants.length} participants)`,
-    );
-
-    // 6️⃣ Reset call_status to pending for these participants so the table
-    //     correctly shows them as "in progress" again
-    await supabase
-      .from("conversation_results")
-      .update({
-        call_status: "pending",
-        last_updated: new Date().toISOString(),
-      })
-      .in("participant_id", participant_ids);
-
+    const result = await retryCallsForParticipants(eventId, participant_ids);
     return res.status(200).json({
-      message: `✅ Retry started for ${participants.length} selected participant(s)`,
-      batch: data,
-      participants_count: participants.length,
-      credit_info: {
-        estimated_credits: formatCredits(estimatedCredits),
-        current_balance: formatCredits(user.credits),
-      },
+      message: `✅ Retry started for ${result.participants_count} selected participant(s)`,
+      ...result,
     });
   } catch (err) {
     console.error("retryBatchCallSelected error:", err);
-    return res
-      .status(500)
-      .json({ error: "Failed to retry selected participants" });
+    return res.status(err.statusCode || 500).json({
+      error: err.message || "Failed to retry selected participants",
+      ...err.details,
+    });
   }
 };
+
+// export const retryBatchCallSelected = async (req, res) => {
+//   try {
+//     const { eventId } = req.params;
+//     const { participant_ids } = req.body;
+
+//     if (!participant_ids?.length) {
+//       return res
+//         .status(400)
+//         .json({ error: "participant_ids array is required" });
+//     }
+
+//     // 1️⃣ Fetch event details
+//     const { data: eventData, error: eventError } = await supabase
+//       .from("events")
+//       .select("*")
+//       .eq("event_id", eventId)
+//       .single();
+
+//     if (eventError || !eventData) {
+//       return res.status(404).json({ error: "Event not found" });
+//     }
+
+//     const user_id = eventData.user_id;
+
+//     // 2️⃣ Fetch only the selected participants
+//     const { data: participants, error: participantError } = await supabase
+//       .from("participants")
+//       .select("participant_id, full_name, phone_number, event_id")
+//       .eq("event_id", eventId)
+//       .in("participant_id", participant_ids);
+
+//     if (participantError) throw participantError;
+
+//     if (!participants || participants.length === 0) {
+//       return res
+//         .status(404)
+//         .json({ error: "None of the selected participants found" });
+//     }
+
+//     console.log(
+//       `🔁 Retrying ${participants.length} selected participant(s) for event ${eventId}`,
+//     );
+
+//     // ── Credit check (same pattern as triggerBatchCall) ──────────────────
+//     const user = await getUserById(user_id);
+//     if (!user) return res.status(404).json({ error: "User not found" });
+
+//     const ESTIMATED_MINUTES_PER_CALL = 3;
+//     const totalEstimatedMinutes =
+//       participants.length * ESTIMATED_MINUTES_PER_CALL;
+//     const estimatedCredits =
+//       totalEstimatedMinutes * CREDIT_PRICING.BATCH_CALL_PER_MINUTE;
+
+//     if (user.credits < estimatedCredits) {
+//       return res.status(402).json({
+//         error: "Insufficient credits to retry selected participants",
+//         current_balance: formatCredits(user.credits),
+//         estimated_credits: formatCredits(estimatedCredits),
+//         shortfall: formatCredits(estimatedCredits - user.credits),
+//         participants_count: participants.length,
+//       });
+//     }
+
+//     // 3️⃣ Fetch agent details (same as triggerBatchCall)
+//     const { data: agentData, error: agentError } = await supabase
+//       .from("agents")
+//       .select("elevenlabs_agent_id, first_message")
+//       .eq("agent_id", eventData.agent_id)
+//       .single();
+
+//     if (agentError || !agentData?.elevenlabs_agent_id) {
+//       return res
+//         .status(400)
+//         .json({ error: "ElevenLabs agent not configured properly" });
+//     }
+
+//     const elevenAgentId = agentData.elevenlabs_agent_id;
+//     const agentFirstMessage = agentData.first_message || null;
+//     const isSmartFields = eventData.field_mode === "smart_fields";
+
+//     // ── Smart fields question block (same as triggerBatchCall) ───────────
+//     let smart_fields_block = "";
+//     if (isSmartFields) {
+//       const { data: smartFields } = await supabase
+//         .from("event_smart_fields")
+//         .select(
+//           "field_key, field_label, field_type, ai_question, options, display_order",
+//         )
+//         .eq("event_id", eventId)
+//         .order("display_order", { ascending: true });
+
+//       if (smartFields && smartFields.length > 0) {
+//         smart_fields_block = smartFields
+//           .map((f, i) => {
+//             let typeLine = `Type: ${f.field_type}`;
+//             if (
+//               f.field_type === "choice" &&
+//               Array.isArray(f.options) &&
+//               f.options.length
+//             ) {
+//               typeLine += ` | Options: ${f.options.join(", ")}`;
+//             }
+//             return `${i + 1}. Ask: "${f.ai_question}"\n   field_key: ${f.field_key}\n   ${typeLine}`;
+//           })
+//           .join("\n\n");
+//       }
+//     }
+
+//     // 4️⃣ Build recipients (same shape as triggerBatchCall)
+//     const recipients = participants.map((p) => {
+//       let formattedPhone = String(p.phone_number || "").trim();
+//       if (formattedPhone && !formattedPhone.startsWith("+")) {
+//         formattedPhone = "+" + formattedPhone;
+//       }
+
+//       const dynamic_variables = isSmartFields
+//         ? {
+//             event_id: String(eventId),
+//             event_name: String(eventData.event_name),
+//             participant_id: String(p.participant_id),
+//             guest_name: String(p.full_name),
+//             knowledge_base_id: String(eventData.knowledge_base_id),
+//             smart_fields_block,
+//           }
+//         : {
+//             eventId: String(eventId),
+//             eventName: String(eventData.event_name),
+//           };
+
+//       return {
+//         id: String(p.participant_id),
+//         conversation_initiation_client_data: {
+//           conversation_config_override: {
+//             agent: {
+//               prompt: null,
+//               first_message: agentFirstMessage,
+//               language: null,
+//             },
+//             tts: { voice_id: null },
+//           },
+//           dynamic_variables,
+//         },
+//         phone_number: formattedPhone,
+//       };
+//     });
+
+//     const scheduledUnix = Math.floor(Date.now() / 1000) + 60;
+
+//     const payload = {
+//       call_name: `event-${eventId}-retry-selected-${Date.now()}`,
+//       agent_id: elevenAgentId,
+//       agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+//       whatsapp_params: null,
+//       recipients,
+//       scheduled_time_unix: scheduledUnix,
+//     };
+
+//     // 5️⃣ Submit to ElevenLabs
+//     const response = await fetch(
+//       "https://api.elevenlabs.io/v1/convai/batch-calling/submit",
+//       {
+//         method: "POST",
+//         headers: {
+//           "xi-api-key": process.env.ELEVENLABS_API_KEY,
+//           "Content-Type": "application/json",
+//         },
+//         body: JSON.stringify(payload),
+//       },
+//     );
+
+//     const data = await response.json();
+
+//     if (!response.ok) {
+//       console.error("❌ ElevenLabs retry-selected error:", data);
+//       return res
+//         .status(500)
+//         .json({ error: "Retry call failed", details: data });
+//     }
+
+//     console.log(
+//       `✅ Selected retry batch created: ${data.id} (${participants.length} participants)`,
+//     );
+
+//     // 6️⃣ Reset call_status to pending for these participants so the table
+//     //     correctly shows them as "in progress" again
+//     await supabase
+//       .from("conversation_results")
+//       .update({
+//         call_status: "pending",
+//         last_updated: new Date().toISOString(),
+//       })
+//       .in("participant_id", participant_ids);
+
+//     return res.status(200).json({
+//       message: `✅ Retry started for ${participants.length} selected participant(s)`,
+//       batch: data,
+//       participants_count: participants.length,
+//       credit_info: {
+//         estimated_credits: formatCredits(estimatedCredits),
+//         current_balance: formatCredits(user.credits),
+//       },
+//     });
+//   } catch (err) {
+//     console.error("retryBatchCallSelected error:", err);
+//     return res
+//       .status(500)
+//       .json({ error: "Failed to retry selected participants" });
+//   }
+// };
+
+export async function syncBatchStatusesForEvent(eventId) {
+  const { data: eventData, error: eventError } = await supabase
+    .from("events")
+    .select("batch_id, field_mode")
+    .eq("event_id", eventId)
+    .single();
+
+  if (eventError || !eventData?.batch_id) {
+    throw new Error("Batch not found for this event");
+  }
+
+  const { batch_id: batchId, field_mode } = eventData;
+  const isSmartFields = field_mode === "smart_fields";
+
+  const elevenResponse = await fetch(
+    `https://api.elevenlabs.io/v1/convai/batch-calling/${batchId}`,
+    {
+      headers: {
+        "xi-api-key": process.env.ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+      },
+    },
+  );
+
+  const batchData = await elevenResponse.json();
+
+  if (!elevenResponse.ok) {
+    console.error("ElevenLabs API error:", batchData);
+    throw new Error("Failed to fetch batch details from ElevenLabs");
+  }
+
+  const recipients = batchData.recipients || [];
+  if (recipients.length === 0) {
+    return { updated: 0, total: 0, batch_status: batchData.status };
+  }
+
+  let updatedCount = 0;
+
+  if (isSmartFields) {
+    const { data: existingLogs } = await supabase
+      .from("event_call_logs")
+      .select("call_log_id, participant_id")
+      .eq("event_id", eventId);
+
+    const logByParticipant = {};
+    (existingLogs || []).forEach((log) => {
+      logByParticipant[log.participant_id] = log.call_log_id;
+    });
+
+    for (const recipient of recipients) {
+      const participantId =
+        recipient.conversation_initiation_client_data?.dynamic_variables
+          ?.participant_id;
+      if (!participantId) continue;
+
+      const existingLogId = logByParticipant[participantId];
+      let callLogId = existingLogId || null;
+
+      if (existingLogId) {
+        const { error: updateError } = await supabase
+          .from("event_call_logs")
+          .update({
+            recipient_status: recipient.status,
+            conversation_id: recipient.conversation_id || null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("call_log_id", existingLogId);
+        if (!updateError) updatedCount++;
+      } else {
+        const { data: insertedLog, error: insertError } = await supabase
+          .from("event_call_logs")
+          .insert({
+            event_id: eventId,
+            participant_id: participantId,
+            recipient_status: recipient.status,
+            conversation_id: recipient.conversation_id || null,
+            call_outcome: "pending",
+          })
+          .select("call_log_id")
+          .single();
+        if (!insertError) {
+          updatedCount++;
+          callLogId = insertedLog?.call_log_id || null;
+        }
+      }
+
+      const UNANSWERED_STATUSES = [
+        "initiated",
+        "no-answer",
+        "no_answer",
+        "failed",
+        "error",
+        "busy",
+      ];
+      if (callLogId && UNANSWERED_STATUSES.includes(recipient.status)) {
+        dispatchEventFollowup({
+          eventId,
+          participantId,
+          callLogId,
+          answered: false,
+        }).catch((err) =>
+          console.warn("Follow-up dispatch failed (non-fatal):", err.message),
+        );
+      }
+    }
+  } else {
+    const { data: participants, error: partError } = await supabase
+      .from("participants")
+      .select("participant_id, phone_number")
+      .eq("event_id", eventId);
+    if (partError) throw partError;
+
+    const protectedStatuses = [
+      "awaiting_rsvp",
+      "awaiting_additional_attendee_name",
+      "awaiting_id_proof",
+      "awaiting_travel_doc_upload",
+      "awaiting_guest_count",
+      "awaiting_notes",
+      "awaiting_doc_role",
+      "awaiting_travel_docs_choice",
+      "awaiting_travel_doc_type",
+      "awaiting_arrival_info",
+      "awaiting_more_attendees",
+      "awaiting_more_travel_docs",
+      "completed",
+    ];
+
+    // Normalize before comparing — recipients come back from ElevenLabs with
+    // whatever prefix we submitted them with (retryCallsForParticipants adds
+    // a leading "+"), but participants.phone_number is stored without one.
+    // An exact string match here silently skipped every recipient, which is
+    // why call_status was never actually updating for classic events.
+    const normalizePhone = (p) => String(p || "").replace(/\D/g, "");
+
+    for (const recipient of recipients) {
+      const participant = participants.find(
+        (p) =>
+          normalizePhone(p.phone_number) ===
+          normalizePhone(recipient.phone_number),
+      );
+      if (!participant) continue;
+
+      const { data: existing } = await supabase
+        .from("conversation_results")
+        .select("call_status")
+        .eq("participant_id", participant.participant_id)
+        .maybeSingle();
+
+      if (protectedStatuses.includes(existing?.call_status)) continue;
+
+      const { error: updateError } = await supabase
+        .from("conversation_results")
+        .update({ call_status: recipient.status })
+        .eq("participant_id", participant.participant_id);
+      if (!updateError) updatedCount++;
+    }
+  }
+
+  await supabase
+    .from("events")
+    .update({
+      batch_status: batchData.status,
+      total_calls_dispatched: batchData.total_calls_dispatched ?? 0,
+      total_calls_finished: batchData.total_calls_finished ?? 0,
+    })
+    .eq("event_id", eventId);
+
+  return {
+    field_mode,
+    updated: updatedCount,
+    total: recipients.length,
+    batch_status: batchData.status,
+  };
+}
 
 export const syncBatchStatuses = async (req, res) => {
   try {
     const { eventId } = req.params;
-
-    // 1. Fetch event — need batch_id and field_mode
-    const { data: eventData, error: eventError } = await supabase
-      .from("events")
-      .select("batch_id, field_mode")
-      .eq("event_id", eventId)
-      .single();
-
-    if (eventError || !eventData?.batch_id) {
-      return res.status(404).json({ error: "Batch not found for this event" });
-    }
-
-    const { batch_id: batchId, field_mode } = eventData;
-    const isSmartFields = field_mode === "smart_fields";
-
-    // 2. Fetch ElevenLabs batch details
-    const elevenResponse = await fetch(
-      `https://api.elevenlabs.io/v1/convai/batch-calling/${batchId}`,
-      {
-        headers: {
-          "xi-api-key": process.env.ELEVENLABS_API_KEY,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    const batchData = await elevenResponse.json();
-
-    if (!elevenResponse.ok) {
-      console.error("ElevenLabs API error:", batchData);
-      return res
-        .status(500)
-        .json({ error: "Failed to fetch batch details", details: batchData });
-    }
-
-    const recipients = batchData.recipients || [];
-    if (recipients.length === 0)
-      return res.status(400).json({ error: "No recipients found in batch" });
-
-    let updatedCount = 0;
-
-    // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
-    if (isSmartFields) {
-      const { data: existingLogs } = await supabase
-        .from("event_call_logs")
-        .select("call_log_id, participant_id")
-        .eq("event_id", eventId);
-
-      const logByParticipant = {};
-      (existingLogs || []).forEach((log) => {
-        logByParticipant[log.participant_id] = log.call_log_id;
-      });
-
-      for (const recipient of recipients) {
-        const participantId =
-          recipient.conversation_initiation_client_data?.dynamic_variables
-            ?.participant_id;
-
-        if (!participantId) continue;
-
-        const existingLogId = logByParticipant[participantId];
-
-        let callLogId = existingLogId || null;
-
-        if (existingLogId) {
-          const { error: updateError } = await supabase
-            .from("event_call_logs")
-            .update({
-              recipient_status: recipient.status,
-              conversation_id: recipient.conversation_id || null,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("call_log_id", existingLogId);
-
-          if (!updateError) updatedCount++;
-        } else {
-          const { data: insertedLog, error: insertError } = await supabase
-            .from("event_call_logs")
-            .insert({
-              event_id: eventId,
-              participant_id: participantId,
-              recipient_status: recipient.status,
-              conversation_id: recipient.conversation_id || null,
-              call_outcome: "pending",
-            })
-            .select("call_log_id")
-            .single();
-
-          if (!insertError) {
-            updatedCount++;
-            callLogId = insertedLog?.call_log_id || null;
-          }
-        }
-
-        // "Unanswered" follow-up trigger — best-effort, never blocks the sync response.
-        const UNANSWERED_STATUSES = [
-          "initiated",
-          "no-answer",
-          "no_answer",
-          "failed",
-          "error",
-          "busy",
-        ];
-        if (callLogId && UNANSWERED_STATUSES.includes(recipient.status)) {
-          dispatchEventFollowup({
-            eventId,
-            participantId,
-            callLogId,
-            answered: false,
-          }).catch((err) =>
-            console.warn("Follow-up dispatch failed (non-fatal):", err.message),
-          );
-        }
-      }
-    } else {
-      // ─── CLASSIC MODE ────────────────────────────────────────────────────
-      const { data: participants, error: partError } = await supabase
-        .from("participants")
-        .select("participant_id, phone_number")
-        .eq("event_id", eventId);
-
-      if (partError) throw partError;
-
-      const protectedStatuses = [
-        "awaiting_rsvp",
-        "awaiting_additional_attendee_name",
-        "awaiting_id_proof",
-        "awaiting_travel_doc_upload",
-        "awaiting_guest_count",
-        "awaiting_notes",
-        "awaiting_doc_role",
-        "awaiting_travel_docs_choice",
-        "awaiting_travel_doc_type",
-        "awaiting_arrival_info",
-        "awaiting_more_attendees",
-        "awaiting_more_travel_docs",
-        "completed",
-      ];
-
-      for (const recipient of recipients) {
-        const participant = participants.find(
-          (p) => p.phone_number === recipient.phone_number,
-        );
-
-        if (!participant) continue;
-
-        const { data: existing } = await supabase
-          .from("conversation_results")
-          .select("call_status")
-          .eq("participant_id", participant.participant_id)
-          .maybeSingle();
-
-        if (protectedStatuses.includes(existing?.call_status)) continue;
-
-        const { error: updateError } = await supabase
-          .from("conversation_results")
-          .update({ call_status: recipient.status })
-          .eq("participant_id", participant.participant_id);
-
-        if (!updateError) updatedCount++;
-      }
-    }
-
-    // 4. Update events — batch_status + call counts (both modes)
-    await supabase
-      .from("events")
-      .update({
-        batch_status: batchData.status,
-        total_calls_dispatched: batchData.total_calls_dispatched ?? 0,
-        total_calls_finished: batchData.total_calls_finished ?? 0,
-      })
-      .eq("event_id", eventId);
-
+    const result = await syncBatchStatusesForEvent(eventId);
     return res.status(200).json({
       message: "Batch call statuses synced successfully",
-      field_mode,
-      updated: updatedCount,
-      total: recipients.length,
-      batch_status: batchData.status,
-      total_calls_dispatched: batchData.total_calls_dispatched,
-      total_calls_finished: batchData.total_calls_finished,
+      ...result,
     });
   } catch (err) {
     console.error("syncBatchStatuses error:", err);
-    return res.status(500).json({ error: "Failed to sync batch statuses" });
+    return res
+      .status(500)
+      .json({ error: err.message || "Failed to sync batch statuses" });
   }
 };
 

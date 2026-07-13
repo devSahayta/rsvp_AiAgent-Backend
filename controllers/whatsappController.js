@@ -1422,21 +1422,19 @@ export const handleSamvaadikWebhook = async (req, res) => {
     });
 
     // ── 1. Get ALL non-closed sessions for this phone ─────────────────────
-    //    ordered newest-first so [0] is always the most-relevant session
     const { data: allSessions } = await supabase
       .from("whatsapp_ai_sessions")
       .select("*")
       .eq("phone_number", normalised)
-      .neq("status", "closed") // 'closed' = admin manually ended
+      .neq("status", "closed")
       .order("last_message_at", { ascending: false });
 
     if (!allSessions?.length) {
       console.warn("⚠️ No session found for:", normalised);
-      return; // no session at all — nothing to do
+      return;
     }
 
-    // ── 2. Determine routing ──────────────────────────────────────────────
-    //    Prefer 'active' (still collecting RSVP) over 'completed'
+    // ── 2. Determine routing ────────────────────────────────────────────────
     const activeSession = allSessions.find((s) => s.status === "active");
     const completedSession = allSessions.find((s) => s.status === "completed");
     const primarySession = activeSession || completedSession;
@@ -1446,7 +1444,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
       return;
     }
 
-    // ── 3. Load participant ───────────────────────────────────────────────
+    // ── 3. Load participant ─────────────────────────────────────────────────
     const { data: participant } = await supabase
       .from("participants")
       .select("*")
@@ -1462,7 +1460,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
     const displayName = participant.full_name?.trim() || "Guest";
     const pid = participant.participant_id;
 
-    // ── 4. Load full event ────────────────────────────────────────────────
+    // ── 4. Load full event ──────────────────────────────────────────────────
     const { data: fullEvent } = await supabase
       .from("events")
       .select(
@@ -1476,55 +1474,148 @@ export const handleSamvaadikWebhook = async (req, res) => {
       return;
     }
 
-    if (fullEvent.field_mode !== "smart_fields") {
-      console.warn("⚠️ Event is not smart_fields — skipping:", eventId);
-      return;
-    }
-
     const userId = fullEvent.user_id;
 
-    // ── 5. Route to the right engine ──────────────────────────────────────
+    // ── 5. Route to the right engine based on field_mode ─────────────────────
     let agentReply;
 
-    if (activeSession) {
-      // ── 5a. RSVP collection (session still active) ────────────────────
-      console.log(
-        `[samvaadikWebhook] 🤖 RSVP mode — session ${activeSession.session_id}`,
-      );
-
-      try {
-        agentReply = await agentChatEngine({
-          phoneNumber: normalised,
-          userMessage: userText,
-          eventId,
-          participantId: pid,
-          guestName: displayName,
-          event: fullEvent,
-        });
-      } catch (err) {
-        console.error("[samvaadikWebhook] agentChatEngine error:", err.message);
-        agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+    if (fullEvent.field_mode === "smart_fields") {
+      if (activeSession) {
+        console.log(
+          `[samvaadikWebhook] 🤖 RSVP mode (smart_fields) — session ${activeSession.session_id}`,
+        );
+        try {
+          agentReply = await agentChatEngine({
+            phoneNumber: normalised,
+            userMessage: userText,
+            eventId,
+            participantId: pid,
+            guestName: displayName,
+            event: fullEvent,
+          });
+        } catch (err) {
+          console.error(
+            "[samvaadikWebhook] agentChatEngine error:",
+            err.message,
+          );
+          agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+        }
+      } else {
+        console.log(
+          `[samvaadikWebhook] 💬 General chat mode — session ${completedSession.session_id}`,
+        );
+        try {
+          agentReply = await generalChatEngine({
+            phoneNumber: normalised,
+            userMessage: userText,
+            primarySession: completedSession,
+            allSessions,
+            event: fullEvent,
+          });
+        } catch (err) {
+          console.error(
+            "[samvaadikWebhook] generalChatEngine error:",
+            err.message,
+          );
+          agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+        }
       }
     } else {
-      // ── 5b. Post-RSVP general chat (session completed) ────────────────
+      // ── Classic event — route through decideNextStep. TEXT ONLY for now.
       console.log(
-        `[samvaadikWebhook] 💬 General chat mode — session ${completedSession.session_id}`,
+        `[samvaadikWebhook] 📋 Classic mode — routing to decideNextStep`,
       );
 
-      try {
-        agentReply = await generalChatEngine({
-          phoneNumber: normalised,
-          userMessage: userText,
-          primarySession: completedSession,
-          allSessions, // pass all so AI has multi-event context
-          event: fullEvent,
-        });
-      } catch (err) {
-        console.error(
-          "[samvaadikWebhook] generalChatEngine error:",
-          err.message,
-        );
-        agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+      if (incomingType !== "text") {
+        agentReply = `${displayName}, I can only handle text replies on this channel right now — for documents, please continue on WhatsApp directly or reach out to the organiser.`;
+      } else {
+        const { data: existingConvo } = await supabase
+          .from("conversation_results")
+          .select("*")
+          .eq("participant_id", pid)
+          .maybeSingle();
+
+        let convo = existingConvo;
+        if (!convo) {
+          const { data: newConvo } = await supabase
+            .from("conversation_results")
+            .insert({
+              participant_id: pid,
+              event_id: eventId,
+              call_status: "awaiting_rsvp",
+              last_updated: new Date().toISOString(),
+            })
+            .select()
+            .single();
+          convo = newConvo;
+        }
+
+        const callStatus = convo?.call_status || "awaiting_rsvp";
+
+        const { data: uploadedDocuments } = await supabase
+          .from("uploads")
+          .select("*")
+          .eq("participant_id", pid);
+
+        let decision;
+        try {
+          decision = await decideNextStep({
+            userMessage: userText,
+            callStatus,
+            participant,
+            convo,
+            cache: {},
+            event: fullEvent,
+            incomingMediaUrl: null,
+            uploadedDocuments: uploadedDocuments || [],
+          });
+        } catch (err) {
+          console.error(
+            "[samvaadikWebhook] decideNextStep error:",
+            err.message,
+          );
+          decision = {
+            reply: `Sorry ${displayName}, I had a technical issue. Please try again.`,
+            nextState: callStatus,
+            actions: { updateDB: false, fields: {} },
+          };
+        }
+
+        agentReply = decision.reply;
+        const nextState = decision.nextState || callStatus;
+        const actions = decision.actions || { updateDB: false, fields: {} };
+
+        try {
+          const fieldsToUpdate = {
+            call_status: nextState,
+            last_updated: new Date().toISOString(),
+            event_id: eventId,
+          };
+          if (actions.updateDB && actions.fields) {
+            Object.keys(actions.fields).forEach(
+              (k) => (fieldsToUpdate[k] = actions.fields[k]),
+            );
+          }
+          await supabase
+            .from("conversation_results")
+            .update(fieldsToUpdate)
+            .eq("participant_id", pid);
+        } catch (err) {
+          console.error(
+            "[samvaadikWebhook] conversation_results update error:",
+            err.message,
+          );
+        }
+
+        if (nextState === "completed" && activeSession) {
+          await supabase
+            .from("whatsapp_ai_sessions")
+            .update({
+              status: "completed",
+              completed_at: new Date().toISOString(),
+            })
+            .eq("session_id", activeSession.session_id);
+        }
       }
     }
 
@@ -1535,7 +1626,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     console.log("[samvaadikWebhook] 🤖 Reply:", agentReply.slice(0, 100));
 
-    // ── 6. Send reply via Samvaadik ───────────────────────────────────────
+    // ── 6. Send reply via Samvaadik ─────────────────────────────────────────
     const { data: conn } = await supabase
       .from("samvaadik_connections")
       .select("api_key, status")
@@ -1566,17 +1657,22 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     console.log("[samvaadikWebhook] ✅ Reply sent to", normalised);
 
-    // ── 7. Deduct credits ─────────────────────────────────────────────────
+    // ── 7. Deduct credits ────────────────────────────────────────────────────
     await deductProductionChatCredits(userId, {
       participant_id: pid,
       event_id: eventId,
       phone: normalised,
-      state: activeSession ? "smart_fields_rsvp" : "smart_fields_general",
+      state:
+        fullEvent.field_mode === "smart_fields"
+          ? activeSession
+            ? "smart_fields_rsvp"
+            : "smart_fields_general"
+          : "classic_rsvp",
     });
 
-    // ── 8. Save to chat logs ──────────────────────────────────────────────
+    // ── 8. Save to chat logs ─────────────────────────────────────────────────
     try {
-      const chat = await chatCtrl.ensureChat({
+      const chat = await upsertAutomationChat({
         event_id: eventId,
         phone_number: normalised,
         person_name: displayName,
@@ -1623,6 +1719,167 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
 import { createSession } from "../utils/sessionManager.js";
 
+export async function sendSamvaadikTemplateToParticipants(
+  eventId,
+  participantIds,
+  templateName,
+  languageCode = "en",
+) {
+  if (!eventId || !templateName) {
+    throw new Error("eventId and templateName are required");
+  }
+
+  const { data: event } = await supabase
+    .from("events")
+    .select("event_id, event_name, user_id, field_mode, agent_id")
+    .eq("event_id", eventId)
+    .single();
+  if (!event) throw new Error("Event not found");
+
+  const { data: conn } = await supabase
+    .from("samvaadik_connections")
+    .select("api_key, status")
+    .eq("user_id", event.user_id)
+    .maybeSingle();
+  if (!conn?.api_key || conn.status !== "active") {
+    throw new Error(
+      "No active Samvaadik connection. Please connect Samvaadik first.",
+    );
+  }
+
+  const { data: participants } = await supabase
+    .from("participants")
+    .select("participant_id, full_name, phone_number")
+    .eq("event_id", eventId);
+  if (!participants?.length)
+    throw new Error("No participants found for this event");
+
+  const targets = participantIds?.length
+    ? participants.filter((p) => participantIds.includes(p.participant_id))
+    : participants;
+  if (!targets.length)
+    throw new Error("None of the selected participants found");
+
+  const results = { sent: 0, failed: 0, errors: [] };
+
+  for (const participant of targets) {
+    try {
+      const phone = String(participant.phone_number).replace(/\D/g, "");
+      const normalised = phone.startsWith("+") ? phone.replace("+", "") : phone;
+      const displayPhone = `+${normalised}`;
+      const name = participant.full_name?.trim() || "Guest";
+
+      await axios.post(
+        `${process.env.SAMVAADIK_BASE_URL}/messages/template`,
+        {
+          phone: displayPhone,
+          template_name: templateName,
+          language_code: languageCode,
+          components: [
+            { type: "body", parameters: [{ type: "text", text: name }] },
+          ],
+        },
+        {
+          headers: {
+            "X-API-Key": conn.api_key,
+            "Content-Type": "application/json",
+          },
+          timeout: 10000,
+        },
+      );
+
+      await createSession({
+        event_id: eventId,
+        participant_id: participant.participant_id,
+        phone_number: normalised,
+        triggered_by: "batch_template",
+      });
+
+      // ← the fix: upsert-by-phone instead of chatCtrl.ensureChat
+      const chat = await upsertAutomationChat({
+        event_id: eventId,
+        phone_number: normalised,
+        person_name: name,
+        user_id: event.user_id,
+      });
+      await chatCtrl.saveMessage({
+        chat_id: chat.chat_id,
+        sender_type: "ai",
+        message: `[Template: ${templateName}] Sent to ${name}`,
+        message_type: "template",
+        media_path: null,
+      });
+
+      results.sent++;
+    } catch (err) {
+      results.failed++;
+      const errMsg = err.response?.data?.message || err.message;
+      results.errors.push(
+        `${participant.full_name} (${participant.phone_number}): ${errMsg}`,
+      );
+      console.error(
+        `[sendSamvaadikTemplateToParticipants] ❌ Failed for ${participant.full_name}:`,
+        errMsg,
+      );
+    }
+  }
+
+  return { total: targets.length, ...results };
+}
+
+// Local to this file — deliberately NOT part of chatController.js's
+// ensureChat, which other flows (webhook replies, classic call flow) rely
+// on with different semantics. One WhatsApp thread per phone number: if a
+// chat already exists for this phone, repoint it at the current event
+// instead of creating a second row for the same contact.
+async function upsertAutomationChat({
+  event_id,
+  phone_number,
+  person_name,
+  user_id,
+}) {
+  const { data: existingRows, error: findErr } = await supabase
+    .from("chats")
+    .select("chat_id")
+    .eq("phone_number", phone_number)
+    .order("created_at", { ascending: true })
+    .limit(1);
+  if (findErr) throw findErr;
+
+  const existing = existingRows?.[0];
+
+  if (existing) {
+    const { data: updated, error: updateErr } = await supabase
+      .from("chats")
+      .update({
+        event_id,
+        person_name,
+        user_id,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("chat_id", existing.chat_id)
+      .select()
+      .single();
+    if (updateErr) throw updateErr;
+    return updated;
+  }
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from("chats")
+    .insert({
+      event_id,
+      phone_number,
+      person_name,
+      user_id,
+      last_message: "",
+      last_message_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+  if (insertErr) throw insertErr;
+  return inserted;
+}
 export const sendSamvaadikBatch = async (req, res) => {
   try {
     const {
@@ -1631,148 +1888,23 @@ export const sendSamvaadikBatch = async (req, res) => {
       language_code = "en",
       participant_ids,
     } = req.body;
-
     if (!event_id || !template_name) {
       return res
         .status(400)
         .json({ error: "event_id and template_name are required" });
     }
-
-    // ── Load event ────────────────────────────────────────────────────────
-    const { data: event } = await supabase
-      .from("events")
-      .select("event_id, event_name, user_id, field_mode, agent_id")
-      .eq("event_id", event_id)
-      .single();
-
-    if (!event) return res.status(404).json({ error: "Event not found" });
-
-    // ── Load Samvaadik connection for this organiser ───────────────────────
-    const { data: conn } = await supabase
-      .from("samvaadik_connections")
-      .select("api_key, status")
-      .eq("user_id", event.user_id)
-      .maybeSingle();
-
-    if (!conn?.api_key || conn.status !== "active") {
-      return res
-        .status(400)
-        .json({
-          error:
-            "No active Samvaadik connection. Please connect Samvaadik first.",
-        });
-    }
-
-    // ── Load participants ─────────────────────────────────────────────────
-    const { data: participants } = await supabase
-      .from("participants")
-      .select("participant_id, full_name, phone_number")
-      .eq("event_id", event_id);
-
-    if (!participants?.length) {
-      return res
-        .status(404)
-        .json({ error: "No participants found for this event" });
-    }
-
-    // ── NEW: Filter to selected participants if participant_ids provided ───
-    const targets = participant_ids?.length
-      ? participants.filter((p) => participant_ids.includes(p.participant_id))
-      : participants;
-
-    if (!targets.length) {
-      return res
-        .status(404)
-        .json({ error: "None of the selected participants found" });
-    }
-
-    const results = { sent: 0, failed: 0, errors: [] };
-
-    for (const participant of targets) {
-      try {
-        const phone = String(participant.phone_number).replace(/\D/g, "");
-        const normalised = phone.startsWith("+")
-          ? phone.replace("+", "")
-          : phone;
-        const displayPhone = `+${normalised}`;
-        const name = participant.full_name?.trim() || "Guest";
-
-        // ── 1. Send template via Samvaadik ──────────────────────────────
-        await axios.post(
-          `${process.env.SAMVAADIK_BASE_URL}/messages/template`,
-          {
-            phone: displayPhone,
-            template_name,
-            language_code,
-            components: [
-              {
-                type: "body",
-                parameters: [{ type: "text", text: name }],
-              },
-            ],
-          },
-          {
-            headers: {
-              "X-API-Key": conn.api_key,
-              "Content-Type": "application/json",
-            },
-            timeout: 10000,
-          },
-        );
-
-        // ── 2. Create WhatsApp AI session (makes the bot respond) ──────────
-        // createSession skips if already completed (won't reset done RSVPs)
-        await createSession({
-          event_id,
-          participant_id: participant.participant_id,
-          phone_number: normalised,
-          triggered_by: "batch_template",
-        });
-
-        // ── 3. Ensure chat row + save outbound message ──────────────────────
-        const chat = await chatCtrl.ensureChat({
-          event_id,
-          phone_number: normalised,
-          person_name: name,
-          user_id: event.user_id,
-        });
-
-        await chatCtrl.saveMessage({
-          chat_id: chat.chat_id,
-          sender_type: "ai",
-          message: `[Template: ${template_name}] Sent to ${name}`,
-          message_type: "template",
-          media_path: null,
-        });
-
-        results.sent++;
-        console.log(
-          `[sendSamvaadikBatch] ✅ Sent to ${name} (${displayPhone})`,
-        );
-      } catch (err) {
-        results.failed++;
-        const errMsg = err.response?.data?.message || err.message;
-        results.errors.push(
-          `${participant.full_name} (${participant.phone_number}): ${errMsg}`,
-        );
-        console.error(
-          `[sendSamvaadikBatch] ❌ Failed for ${participant.full_name}:`,
-          errMsg,
-        );
-      }
-    }
-
-    console.log(
-      `[sendSamvaadikBatch] Done: ${results.sent} sent, ${results.failed} failed (target: ${targets.length}/${participants.length})`,
+    const result = await sendSamvaadikTemplateToParticipants(
+      event_id,
+      participant_ids,
+      template_name,
+      language_code,
     );
-
     return res.json({
       success: true,
       event_id,
       template: template_name,
-      total: targets.length,
-      ...results,
-      message: `${results.sent}/${targets.length} messages sent. Chatbot is now active for replies.`,
+      ...result,
+      message: `${result.sent}/${result.total} messages sent. Chatbot is now active for replies.`,
     });
   } catch (err) {
     console.error("[sendSamvaadikBatch] Error:", err.message);

@@ -1398,17 +1398,14 @@ export const sendBatchInitialMessage = async (req, res) => {
 };
 
 export const handleSamvaadikWebhook = async (req, res) => {
-  // Always respond 200 immediately so Samvaadik doesn't retry
-  res.sendStatus(200);
-
   console.log("🔹 SAMVAADIK WEBHOOK:", JSON.stringify(req.body, null, 2));
 
   const { event, from, message, message_type, account_id } = req.body;
 
-  if (event !== "message.received") return;
+  if (event !== "message.received") return res.sendStatus(200);
   if (!from || !message) {
     console.warn("⚠️ Missing from or message");
-    return;
+    return res.sendStatus(200);
   }
 
   try {
@@ -1431,7 +1428,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     if (!allSessions?.length) {
       console.warn("⚠️ No session found for:", normalised);
-      return;
+      return res.sendStatus(200);
     }
 
     // ── 2. Determine routing ────────────────────────────────────────────────
@@ -1441,7 +1438,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     if (!primarySession) {
       console.warn("⚠️ No actionable session for:", normalised);
-      return;
+      return res.sendStatus(200);
     }
 
     // ── 3. Load participant ─────────────────────────────────────────────────
@@ -1453,7 +1450,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     if (!participant) {
       console.warn("⚠️ Participant not found:", primarySession.participant_id);
-      return;
+      return res.sendStatus(200);
     }
 
     const eventId = primarySession.event_id;
@@ -1471,7 +1468,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     if (!fullEvent) {
       console.warn("⚠️ Event not found:", eventId);
-      return;
+      return res.sendStatus(200);
     }
 
     const userId = fullEvent.user_id;
@@ -1621,7 +1618,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     if (!agentReply) {
       console.warn("[samvaadikWebhook] No reply generated");
-      return;
+      return res.sendStatus(200);
     }
 
     console.log("[samvaadikWebhook] 🤖 Reply:", agentReply.slice(0, 100));
@@ -1638,7 +1635,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
         "[samvaadikWebhook] No active Samvaadik connection for:",
         userId,
       );
-      return;
+      return res.sendStatus(200);
     }
 
     const axiosLib = (await import("axios")).default;
@@ -1698,8 +1695,13 @@ export const handleSamvaadikWebhook = async (req, res) => {
         chatErr.message,
       );
     }
+
+    // ── Respond only after all work is done ──────────────────────────────────
+    return res.sendStatus(200);
   } catch (err) {
     console.error("[samvaadikWebhook] Fatal error:", err.message);
+    // Still 200 so Samvaadik doesn't retry — but only sent after we tried.
+    return res.sendStatus(200);
   }
 };
 

@@ -17,6 +17,8 @@ import {
   testVoiceAgent,
 } from "../controllers/agentTestController.js";
 
+import { generateKnowledgeBase } from "../controllers/knowledgeBaseAIController.js";
+
 const router = express.Router();
 // Template routes
 router.get("/templates", getAgentTemplates);
@@ -38,5 +40,8 @@ router.get("/user/:user_id", getUserAgents);
 router.get("/:agent_id", getAgentDetails);
 router.put("/:agent_id", updateAgentDetails);
 router.delete("/:agent_id", deleteAgentComplete);
+
+// Knowledge Base AI route
+router.post("/generate-knowledge-base", generateKnowledgeBase);
 
 export default router;

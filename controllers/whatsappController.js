@@ -25,6 +25,19 @@ const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
 const TEMPLATE_URL = process.env.TEMPLATE_BASE_URL;
 
+// Persistent conversation cache for Samvaadik classic-mode doc collection
+// (mirrors the same pattern used in handleIncomingMessage)
+const samvaadikConvoCache = new Map();
+
+function ensureSamvaadikCache(pid) {
+  if (!samvaadikConvoCache.has(pid)) {
+    samvaadikConvoCache.set(pid, {
+      currentDoc: { name: null, role: null, type: null },
+    });
+  }
+  return samvaadikConvoCache.get(pid);
+}
+
 /* ---------------------------
    Fetch Template
    --------------------------- */
@@ -1157,7 +1170,7 @@ export const startInitialMessage = async (req, res) => {
           .from("chats")
           .select("chat_id")
           .eq("phone_number", phone)
-          .eq("event_id", person.event_id)
+          // .eq("event_id", person.event_id)
           .maybeSingle();
 
         if (existingChat?.chat_id) {
@@ -1302,7 +1315,7 @@ export const sendBatchInitialMessage = async (req, res) => {
           .from("chats")
           .select("chat_id")
           .eq("phone_number", phone)
-          .eq("event_id", p.event_id)
+          // .eq("event_id", p.event_id)
           .maybeSingle();
 
         if (chatError) {
@@ -1518,101 +1531,243 @@ export const handleSamvaadikWebhook = async (req, res) => {
         }
       }
     } else {
-      // ── Classic event — route through decideNextStep. TEXT ONLY for now.
       console.log(
         `[samvaadikWebhook] 📋 Classic mode — routing to decideNextStep`,
       );
 
-      if (incomingType !== "text") {
-        agentReply = `${displayName}, I can only handle text replies on this channel right now — for documents, please continue on WhatsApp directly or reach out to the organiser.`;
-      } else {
-        const { data: existingConvo } = await supabase
-          .from("conversation_results")
-          .select("*")
-          .eq("participant_id", pid)
-          .maybeSingle();
+      const { data: existingConvo } = await supabase
+        .from("conversation_results")
+        .select("*")
+        .eq("participant_id", pid)
+        .maybeSingle();
 
-        let convo = existingConvo;
-        if (!convo) {
-          const { data: newConvo } = await supabase
-            .from("conversation_results")
+      let convo = existingConvo;
+      if (!convo) {
+        const { data: newConvo } = await supabase
+          .from("conversation_results")
+          .insert({
+            participant_id: pid,
+            event_id: eventId,
+            call_status: "awaiting_rsvp",
+            last_updated: new Date().toISOString(),
+          })
+          .select()
+          .single();
+        convo = newConvo;
+      }
+
+      const callStatus = convo?.call_status || "awaiting_rsvp";
+      const cache = ensureSamvaadikCache(pid);
+      const { data: uploadedDocuments } = await supabase
+        .from("uploads")
+        .select("*")
+        .eq("participant_id", pid);
+
+      // ── NEW: download inbound media (Samvaadik's public URL — no auth needed) ──
+      let storedMediaPath = null;
+      if (incomingType !== "text" && req.body.media_url) {
+        try {
+          console.log("📤 Downloading media from Samvaadik URL...");
+          const resp = await fetch(req.body.media_url);
+          if (!resp.ok) {
+            throw new Error(`Fetch failed: ${resp.status}`);
+          }
+          const buffer = Buffer.from(await resp.arrayBuffer());
+          const ts = Date.now();
+          const urlParts = req.body.media_url.split("/");
+          const origFilename =
+            urlParts[urlParts.length - 1] || `document_${ts}`;
+          const storagePath = `${pid}/${eventId}/${ts}_${origFilename}`;
+
+          const { error: uploadError } = await supabase.storage
+            .from("participant-docs")
+            .upload(storagePath, buffer, {
+              contentType:
+                resp.headers.get("content-type") || "application/octet-stream",
+              upsert: false,
+            });
+
+          if (uploadError) {
+            console.error("❌ Supabase upload error:", uploadError);
+          } else {
+            storedMediaPath = storagePath;
+            console.log("✅ Media stored at:", storedMediaPath);
+          }
+        } catch (err) {
+          console.error(
+            "❌ Failed to download/store Samvaadik media:",
+            err.message,
+          );
+        }
+      }
+
+      let decision;
+      try {
+        decision = await decideNextStep({
+          userMessage: userText,
+          callStatus,
+          participant,
+          convo,
+          cache,
+          event: fullEvent,
+          incomingMediaUrl: storedMediaPath,
+          uploadedDocuments: uploadedDocuments || [],
+        });
+      } catch (err) {
+        console.error("[samvaadikWebhook] decideNextStep error:", err.message);
+        decision = {
+          reply: `Sorry ${displayName}, I had a technical issue. Please try again.`,
+          nextState: callStatus,
+          actions: { updateDB: false, fields: {} },
+        };
+      }
+
+      agentReply = decision.reply;
+      const nextState = decision.nextState || callStatus;
+      const actions = decision.actions || { updateDB: false, fields: {} };
+
+      // ── NEW: persist cacheUpdate so context survives across turns ──────────
+      if (actions.cacheUpdate) {
+        if (actions.cacheUpdate.currentDocName !== undefined)
+          cache.currentDoc.name = actions.cacheUpdate.currentDocName;
+        if (actions.cacheUpdate.currentDocRole !== undefined)
+          cache.currentDoc.role = actions.cacheUpdate.currentDocRole;
+        if (actions.cacheUpdate.currentDocType !== undefined)
+          cache.currentDoc.type = actions.cacheUpdate.currentDocType;
+        console.log("💾 [samvaadikWebhook] Cache updated:", cache.currentDoc);
+      }
+
+      // ── NEW: persist upload row + travel itinerary, mirroring handleIncomingMessage ──
+      let uploadResult = null;
+      if (actions.saveUpload && storedMediaPath) {
+        try {
+          const uploadUrl =
+            actions.saveUpload.document_url === "MEDIA"
+              ? storedMediaPath
+              : actions.saveUpload.document_url;
+
+          const { data: savedUpload, error: uploadRowError } = await supabase
+            .from("uploads")
             .insert({
               participant_id: pid,
-              event_id: eventId,
-              call_status: "awaiting_rsvp",
-              last_updated: new Date().toISOString(),
+              participant_relatives_name:
+                actions.saveUpload.participant_relatives_name ??
+                participant.full_name,
+              document_url: uploadUrl,
+              document_type: actions.saveUpload.document_type ?? "Document",
+              role: actions.saveUpload.role ?? "Self",
+              proof_uploaded: true,
+              created_at: new Date().toISOString(),
             })
-            .select()
-            .single();
-          convo = newConvo;
-        }
+            .select();
 
-        const callStatus = convo?.call_status || "awaiting_rsvp";
+          if (uploadRowError) {
+            console.error("❌ Error inserting upload row:", uploadRowError);
+          } else {
+            uploadResult = savedUpload;
+            console.log("✅ Upload saved to uploads table");
+            // ── NEW: OCR extraction for travel documents (Samvaadik path) ──────
+            const docType = actions.saveUpload.document_type || "";
+            const isTravelDoc =
+              docType.toLowerCase().includes("arrival") ||
+              docType.toLowerCase().includes("return") ||
+              docType.toLowerCase().includes("ticket");
 
-        const { data: uploadedDocuments } = await supabase
-          .from("uploads")
-          .select("*")
-          .eq("participant_id", pid);
+            if (isTravelDoc && req.body.media_url) {
+              console.log(
+                "🤖 Running automatic travel doc extraction (Samvaadik path)",
+              );
+              try {
+                const extractionResult = await autoExtractFromImage({
+                  documentUrl: req.body.media_url,
+                });
+                console.log("📤 Extraction result:", extractionResult);
 
-        let decision;
-        try {
-          decision = await decideNextStep({
-            userMessage: userText,
-            callStatus,
-            participant,
-            convo,
-            cache: {},
-            event: fullEvent,
-            incomingMediaUrl: null,
-            uploadedDocuments: uploadedDocuments || [],
-          });
-        } catch (err) {
-          console.error(
-            "[samvaadikWebhook] decideNextStep error:",
-            err.message,
-          );
-          decision = {
-            reply: `Sorry ${displayName}, I had a technical issue. Please try again.`,
-            nextState: callStatus,
-            actions: { updateDB: false, fields: {} },
-          };
-        }
+                if (
+                  extractionResult?.success &&
+                  extractionResult.extractedData
+                ) {
+                  let direction = null;
+                  if (docType.toLowerCase().includes("arrival"))
+                    direction = "arrival";
+                  else if (docType.toLowerCase().includes("return"))
+                    direction = "return";
 
-        agentReply = decision.reply;
-        const nextState = decision.nextState || callStatus;
-        const actions = decision.actions || { updateDB: false, fields: {} };
+                  if (direction && uploadResult && uploadResult[0]?.upload_id) {
+                    const personName =
+                      actions.saveUpload.participant_relatives_name ||
+                      participant.full_name;
 
-        try {
-          const fieldsToUpdate = {
-            call_status: nextState,
-            last_updated: new Date().toISOString(),
-            event_id: eventId,
-          };
-          if (actions.updateDB && actions.fields) {
-            Object.keys(actions.fields).forEach(
-              (k) => (fieldsToUpdate[k] = actions.fields[k]),
-            );
+                    await saveTravelItinerary({
+                      participant_id: pid,
+                      upload_id: uploadResult[0].upload_id,
+                      event_id: eventId,
+                      extractedData: extractionResult.extractedData,
+                      direction,
+                      document_type: docType,
+                      participant_relatives_name: personName,
+                    });
+                    console.log("✅ Travel itinerary saved (Samvaadik path)");
+                  }
+                } else {
+                  console.warn(
+                    "⚠️ Extraction failed or no data:",
+                    extractionResult?.error,
+                  );
+                }
+              } catch (err) {
+                console.error(
+                  "❌ OCR extraction error (Samvaadik path):",
+                  err.message,
+                );
+              }
+            }
           }
-          await supabase
-            .from("conversation_results")
-            .update(fieldsToUpdate)
-            .eq("participant_id", pid);
         } catch (err) {
-          console.error(
-            "[samvaadikWebhook] conversation_results update error:",
-            err.message,
+          console.error("❌ Error saving upload:", err.message);
+        }
+      }
+
+      try {
+        const fieldsToUpdate = {
+          call_status: nextState,
+          last_updated: new Date().toISOString(),
+          event_id: eventId,
+        };
+        if (actions.updateDB && actions.fields) {
+          Object.keys(actions.fields).forEach(
+            (k) => (fieldsToUpdate[k] = actions.fields[k]),
           );
         }
-
-        if (nextState === "completed" && activeSession) {
-          await supabase
-            .from("whatsapp_ai_sessions")
-            .update({
-              status: "completed",
-              completed_at: new Date().toISOString(),
-            })
-            .eq("session_id", activeSession.session_id);
+        if (storedMediaPath) {
+          fieldsToUpdate.document_url = storedMediaPath;
+          if (actions.fields?.proof_uploaded !== false) {
+            fieldsToUpdate.proof_uploaded = true;
+          }
         }
+        if (uploadResult?.[0]?.upload_id) {
+          fieldsToUpdate.upload_id = uploadResult[0].upload_id;
+        }
+
+        await supabase
+          .from("conversation_results")
+          .update(fieldsToUpdate)
+          .eq("participant_id", pid);
+      } catch (err) {
+        console.error(
+          "[samvaadikWebhook] conversation_results update error:",
+          err.message,
+        );
+      }
+
+      if (nextState === "completed" && activeSession) {
+        await supabase
+          .from("whatsapp_ai_sessions")
+          .update({
+            status: "completed",
+            completed_at: new Date().toISOString(),
+          })
+          .eq("session_id", activeSession.session_id);
       }
     }
 
@@ -1680,7 +1835,7 @@ export const handleSamvaadikWebhook = async (req, res) => {
         sender_type: "user",
         message: userText,
         message_type: incomingType,
-        media_path: null,
+        media_path: incomingType !== "text" ? req.body.media_url || null : null,
       });
       await chatCtrl.saveMessage({
         chat_id: chat.chat_id,
@@ -1750,6 +1905,28 @@ export async function sendSamvaadikTemplateToParticipants(
     );
   }
 
+  // ── NEW: if caller didn't supply the real template body, fetch it ──────────
+  if (!templateBodyText) {
+    try {
+      const { getTemplates } = await import("../utils/samvaadikClient.js");
+      const templatesResp = await getTemplates(conn.api_key);
+      const matchedTemplate = templatesResp?.data?.find(
+        (t) => t.name === templateName || t.template_name === templateName,
+      );
+      templateBodyText =
+        matchedTemplate?.body_text ||
+        matchedTemplate?.components?.find((c) => c.type === "BODY")?.text ||
+        null;
+      console.log(
+        templateBodyText
+          ? "✅ Fetched real template body for message logging"
+          : "⚠️ Could not find matching template body, will fall back to placeholder",
+      );
+    } catch (fetchErr) {
+      console.error("⚠️ Failed to fetch template body:", fetchErr.message);
+    }
+  }
+
   const { data: participants } = await supabase
     .from("participants")
     .select("participant_id, full_name, phone_number")
@@ -1790,6 +1967,15 @@ export async function sendSamvaadikTemplateToParticipants(
           timeout: 10000,
         },
       );
+
+      // Close any other non-closed session for this phone number, from any
+      // other event — sending a new template always makes THIS event's
+      // agent the active one going forward, whether classic or smart_fields.
+      await supabase
+        .from("whatsapp_ai_sessions")
+        .update({ status: "closed", completed_at: new Date().toISOString() })
+        .eq("phone_number", normalised)
+        .neq("status", "closed");
 
       await createSession({
         event_id: eventId,
@@ -1854,13 +2040,12 @@ async function upsertAutomationChat({
   person_name,
   user_id,
 }) {
-  const { data: existingRows, error: findErr } = await supabase
+  const { data: existingRows } = await supabase
     .from("chats")
     .select("chat_id")
-    .eq("phone_number", phone_number)
+    .eq("phone_number", phone_number) // ← removed event_id filter
     .order("created_at", { ascending: true })
     .limit(1);
-  if (findErr) throw findErr;
 
   const existing = existingRows?.[0];
 
@@ -1868,7 +2053,7 @@ async function upsertAutomationChat({
     const { data: updated, error: updateErr } = await supabase
       .from("chats")
       .update({
-        event_id,
+        event_id, // ← now allowed to update again, since single-thread-per-number is the intent
         person_name,
         user_id,
         updated_at: new Date().toISOString(),

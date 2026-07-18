@@ -170,7 +170,7 @@ export async function getMessagesForChat({
       "message_id, chat_id, sender_type, message, message_type, media_path, created_at, buttons",
     )
     .eq("chat_id", chat_id)
-    .order("created_at", { ascending: true })
+    .order("created_at", { ascending: false }) // ← newest first now
     .limit(limit);
 
   if (before) {
@@ -181,20 +181,43 @@ export async function getMessagesForChat({
       )
       .eq("chat_id", chat_id)
       .lt("created_at", before)
-      .order("created_at", { ascending: true })
+      .order("created_at", { ascending: false }) // ← newest-before-cursor first
       .limit(limit);
   }
 
   const { data, error } = await query;
   if (error) throw error;
 
-  const messages = data || [];
+  // Reverse back to chronological (oldest→newest) for display order
+  const messages = (data || []).reverse();
+
   for (let msg of messages) {
     if (!msg.media_path) continue;
-    const { data: signed } = await supabase.storage
-      .from("participant-docs")
-      .createSignedUrl(msg.media_path, 86400);
-    if (signed?.signedUrl) msg.media_path = signed.signedUrl;
+
+    if (
+      msg.media_path.startsWith("http://") ||
+      msg.media_path.startsWith("https://")
+    ) {
+      continue;
+    }
+
+    try {
+      const { data: signed, error: signErr } = await supabase.storage
+        .from("participant-docs")
+        .createSignedUrl(msg.media_path, 86400);
+      if (signErr) {
+        console.warn(
+          "⚠️ Failed to sign media URL:",
+          msg.message_id,
+          signErr.message,
+        );
+      } else if (signed?.signedUrl) {
+        msg.media_path = signed.signedUrl;
+      }
+    } catch (err) {
+      console.error("❌ createSignedUrl threw:", msg.message_id, err.message);
+    }
   }
+
   return messages;
 }

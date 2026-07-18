@@ -26,22 +26,27 @@ export async function sendToClaude(
     try {
       console.log(`🔄 Claude API attempt ${attempt}/${maxRetries}...`);
 
-      const response = await anthropic.messages.create({
-        // claude-haiku-4-5 — fast, cost-efficient, perfect for conversational RSVP turns
-        // Fallback via options.model if a specific caller needs a different model
-        model: options.model || "claude-haiku-4-5-20251001",
+      const requestPayload = {
+        model: options.model || process.env.CLAUDE_MODEL || "claude-sonnet-5",
         max_tokens: options.max_tokens || 500,
-        temperature:
-          options.temperature !== undefined ? options.temperature : 0.0,
         system: systemPrompt,
         messages: messages,
-      });
+        thinking: { type: "disabled" },
+      };
 
-      // Success!
+      // Only include temperature if explicitly passed — some newer models
+      // (e.g. claude-sonnet-5) reject this parameter entirely.
+      if (options.temperature !== undefined) {
+        requestPayload.temperature = options.temperature;
+      }
+
+      const response = await anthropic.messages.create(requestPayload);
+
       console.log(`✅ Claude API success on attempt ${attempt}`);
+      const textBlock = response.content.find((block) => block.type === "text");
 
       return {
-        text: response.content[0]?.text || "",
+        text: textBlock?.text || "",
         usage: response.usage,
         model: response.model,
       };

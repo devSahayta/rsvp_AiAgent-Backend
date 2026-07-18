@@ -1,95 +1,108 @@
-    // utils/aiDecisionEngine.js
-    import { sendToClaude } from "./claudeClient.js";
-    import { getWeddingInfo, STATE_INSTRUCTIONS } from "./weddingInfo.js";
+// utils/aiDecisionEngine.js
+import { sendToClaude } from "./claudeClient.js";
+import { getWeddingInfo, STATE_INSTRUCTIONS } from "./weddingInfo.js";
 
-    // ========================================
-    // UPDATED ALLOWED STATES - ADDED NEW TRAVEL STATES
-    // ========================================
-    const ALLOWED_STATES = [
-      "awaiting_rsvp", 
-      "awaiting_guest_count", 
-      "awaiting_notes", 
-      "showing_summary",
-      "awaiting_doc_person_name", 
-      "awaiting_doc_role", 
-      "awaiting_doc_upload",
-      "awaiting_id_proof", 
-      
-      // NEW TRAVEL DOCUMENT STATES
-      "awaiting_travel_docs_choice",      // Ask if they have travel docs
-      "awaiting_travel_doc_type",         // Ask what type (Flight/Train/Bus)
-      "awaiting_travel_doc_direction",    // Ask arrival/return/both
-      "awaiting_travel_doc_upload",       // Upload the document
-      "awaiting_arrival_manual_date",     // Manual arrival date input
-      "awaiting_arrival_manual_time",     // Manual arrival time input
-      "awaiting_return_choice",        // Ask if they have return info
-      "awaiting_return_manual_date",   // Manual return date input
-      "awaiting_return_manual_time",   // Manual return time input
-      
-      "awaiting_more_attendees",
-      "awaiting_additional_attendee_name", 
-      "confirm_rsvp_update", 
-      "completed"
-    ];
+// ========================================
+// UPDATED ALLOWED STATES - ADDED NEW TRAVEL STATES
+// ========================================
+const ALLOWED_STATES = [
+  "awaiting_rsvp",
+  "awaiting_guest_count",
+  "awaiting_notes",
+  "showing_summary",
+  "awaiting_doc_person_name",
+  "awaiting_doc_role",
+  "awaiting_doc_upload",
+  "awaiting_id_proof",
 
-    export default async function decideNextStep(context = {}, options = {}) {
-      // ✅ Extract mode flag (defaults to "production")
-      const { mode = "production" } = options;
-      
-      // Log mode for debugging
-      if (mode === "test") {
-        console.log("🧪 TEST MODE - Running in test mode");
-      }
-      const {
-        userMessage = "",
-        callStatus = "awaiting_rsvp",
-        participant = {},
-        convo = {},
-        cache = {},
-        event = {},
-        incomingMediaUrl = null,
-        uploadedDocuments = []
-      } = context;
+  // NEW TRAVEL DOCUMENT STATES
+  "awaiting_travel_docs_choice", // Ask if they have travel docs
+  "awaiting_travel_doc_type", // Ask what type (Flight/Train/Bus)
+  "awaiting_travel_doc_direction", // Ask arrival/return/both
+  "awaiting_travel_doc_upload", // Upload the document
+  "awaiting_arrival_manual_date", // Manual arrival date input
+  "awaiting_arrival_manual_time", // Manual arrival time input
+  "awaiting_return_choice", // Ask if they have return info
+  "awaiting_return_manual_date", // Manual return date input
+  "awaiting_return_manual_time", // Manual return time input
 
-      let normalizedMessage = userMessage?.trim()?.toLowerCase();
+  "awaiting_more_attendees",
+  "awaiting_additional_attendee_name",
+  "confirm_rsvp_update",
+  "completed",
+];
 
-      // ===== WEDDING INFO OVERRIDE (ABSOLUTE PRIORITY) =====
-      const needsWeddingInfo =
-        /venue|location|place|address|where|map|direction/.test(normalizedMessage) ||
-        /date|when|time|timing|schedule|event|program|itinerary/.test(normalizedMessage) ||
-        /detail|info|information|send.*detail|share.*detail/.test(normalizedMessage) ||
-        /dress.*code|what.*wear|outfit/.test(normalizedMessage) ||
-        /mehendi|sangeet|haldi|wedding|ceremony|party/.test(normalizedMessage);
+export default async function decideNextStep(context = {}, options = {}) {
+  // ✅ Extract mode flag (defaults to "production")
+  const { mode = "production" } = options;
 
-      // 🔍 DEBUG LOGGING
-      if (needsWeddingInfo) {
-        console.log("🔍 KB FETCH TRIGGERED");
-        console.log("📋 Event object:", JSON.stringify(event, null, 2));
-        console.log("🔑 KB ID from event:", event?.knowledge_base_id);
-      }
+  // Log mode for debugging
+  if (mode === "test") {
+    console.log("🧪 TEST MODE - Running in test mode");
+  }
+  const {
+    userMessage = "",
+    callStatus = "awaiting_rsvp",
+    participant = {},
+    convo = {},
+    cache = {},
+    event = {},
+    incomingMediaUrl = null,
+    uploadedDocuments = [],
+  } = context;
 
-      // Fetch KB info if needed (with fallback for testing)
-      const kbId = event?.knowledge_base_id || "69fd2a69-a8c1-4cfc-9dec-ffa1ecbd59c1"; // ⚠️ Temporary fallback for testing
-      
-      if (needsWeddingInfo && kbId) {
-        console.log("🚀 Fetching KB with ID:", kbId);
-        const weddingInfo = await getWeddingInfo(kbId);
+  let normalizedMessage = userMessage?.trim()?.toLowerCase();
 
-        console.log("✅ KB Data received:", weddingInfo ? `${weddingInfo.substring(0, 100)}...` : "NULL");
+  // ===== WEDDING INFO OVERRIDE (ABSOLUTE PRIORITY) =====
+  const needsWeddingInfo =
+    /venue|location|place|address|where|map|direction/.test(
+      normalizedMessage,
+    ) ||
+    /date|when|time|timing|schedule|event|program|itinerary/.test(
+      normalizedMessage,
+    ) ||
+    /detail|info|information|send.*detail|share.*detail/.test(
+      normalizedMessage,
+    ) ||
+    /dress.*code|what.*wear|outfit/.test(normalizedMessage) ||
+    /mehendi|sangeet|haldi|wedding|ceremony|party/.test(normalizedMessage);
 
-        if (weddingInfo) {
-          // Check if user ONLY asked about dress code
-          const isDressCodeOnly = /dress.*code|what.*wear|outfit/i.test(normalizedMessage) &&
-            !/venue|location|date|when|time|schedule/i.test(normalizedMessage);
+  // 🔍 DEBUG LOGGING
+  if (needsWeddingInfo) {
+    console.log("🔍 KB FETCH TRIGGERED");
+    console.log("📋 Event object:", JSON.stringify(event, null, 2));
+    console.log("🔑 KB ID from event:", event?.knowledge_base_id);
+  }
 
-          if (isDressCodeOnly) {
-            console.log("🎨 Dress code query detected - formatting response");
-            
-            // Try to extract dress codes with event context using AI
-            try {
-              console.log("🤖 Using AI to extract and format dress codes with event names");
-              
-              const aiPrompt = `Extract ONLY the dress codes from this wedding info and format them nicely with the event names.
+  // Fetch KB info if needed (with fallback for testing)
+  const kbId =
+    event?.knowledge_base_id || "69fd2a69-a8c1-4cfc-9dec-ffa1ecbd59c1"; // ⚠️ Temporary fallback for testing
+
+  if (needsWeddingInfo && kbId) {
+    console.log("🚀 Fetching KB with ID:", kbId);
+    const weddingInfo = await getWeddingInfo(kbId);
+
+    console.log(
+      "✅ KB Data received:",
+      weddingInfo ? `${weddingInfo.substring(0, 100)}...` : "NULL",
+    );
+
+    if (weddingInfo) {
+      // Check if user ONLY asked about dress code
+      const isDressCodeOnly =
+        /dress.*code|what.*wear|outfit/i.test(normalizedMessage) &&
+        !/venue|location|date|when|time|schedule/i.test(normalizedMessage);
+
+      if (isDressCodeOnly) {
+        console.log("🎨 Dress code query detected - formatting response");
+
+        // Try to extract dress codes with event context using AI
+        try {
+          console.log(
+            "🤖 Using AI to extract and format dress codes with event names",
+          );
+
+          const aiPrompt = `Extract ONLY the dress codes from this wedding info and format them nicely with the event names.
 
     Wedding Info:
     ${weddingInfo}
@@ -105,63 +118,67 @@
     Return ONLY valid JSON (no markdown, no code blocks):
     {"reply": "Here are the dress codes! 👗✨\\n\\n- Event: Dress Code\\n- Event: Dress Code", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
 
-              const { text: raw } = await sendToClaude(
-                "Dress Code Assistant",
-                [{ role: "user", content: aiPrompt }],
-                { model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514", temperature: 0 }
-              );
+          const { text: raw } = await sendToClaude(
+            "Dress Code Assistant",
+            [{ role: "user", content: aiPrompt }],
+            {
+              model: process.env.CLAUDE_MODEL || "claude-sonnet-5",
+              // temperature: 0,
+            },
+          );
 
-              console.log("🤖 AI raw response:", raw?.substring(0, 200));
+          console.log("🤖 AI raw response:", raw?.substring(0, 200));
 
-              // Clean up the response
-              let cleanedRaw = raw.trim();
-              cleanedRaw = cleanedRaw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
-              
-              let parsed = {};
-              try {
-                parsed = JSON.parse(cleanedRaw);
-              } catch (e) {
-                console.warn("⚠️  First parse failed, trying regex extraction");
-                const match = cleanedRaw.match(/\{[\s\S]*\}/);
-                if (match) {
-                  parsed = JSON.parse(match[0]);
-                } else {
-                  throw new Error("Could not extract JSON from AI response");
-                }
-              }
-              
-              console.log("✅ Dress code AI response parsed successfully");
-              return parsed;
-              
-            } catch (err) {
-              console.error("❌ Dress code AI error:", err.message);
-              console.log("⚠️  Falling back to simple dress code extraction");
-              
-              // Fallback: Simple extraction without event names
-              const dressCodeLines = weddingInfo
-                .split('\n')
-                .filter(line => /dress.*code/i.test(line))
-                .map(line => line.trim())
-                .filter(Boolean);
-              
-              if (dressCodeLines.length > 0) {
-                const dressCodeResponse = `Here are the dress codes for the wedding! 👗✨\n\n${dressCodeLines.join('\n')}`;
-                return {
-                  reply: dressCodeResponse,
-                  nextState: callStatus,
-                  actions: { updateDB: false, fields: {} }
-                };
-              }
-              
-              // Last resort: return full KB
-              console.log("⚠️  No dress codes found, returning full KB");
+          // Clean up the response
+          let cleanedRaw = raw.trim();
+          cleanedRaw = cleanedRaw
+            .replace(/```json\s*/g, "")
+            .replace(/```\s*/g, "");
+
+          let parsed = {};
+          try {
+            parsed = JSON.parse(cleanedRaw);
+          } catch (e) {
+            console.warn("⚠️  First parse failed, trying regex extraction");
+            const match = cleanedRaw.match(/\{[\s\S]*\}/);
+            if (match) {
+              parsed = JSON.parse(match[0]);
+            } else {
+              throw new Error("Could not extract JSON from AI response");
             }
           }
 
-          // For all other queries, use AI to answer intelligently based on the specific question
-          console.log("🤖 Using AI to answer specific question from KB");
-          try {
-            const aiPrompt = `You are EventBot, a helpful wedding assistant. Answer the user's SPECIFIC question using the wedding information provided.
+          console.log("✅ Dress code AI response parsed successfully");
+          return parsed;
+        } catch (err) {
+          console.error("❌ Dress code AI error:", err.message);
+          console.log("⚠️  Falling back to simple dress code extraction");
+
+          // Fallback: Simple extraction without event names
+          const dressCodeLines = weddingInfo
+            .split("\n")
+            .filter((line) => /dress.*code/i.test(line))
+            .map((line) => line.trim())
+            .filter(Boolean);
+
+          if (dressCodeLines.length > 0) {
+            const dressCodeResponse = `Here are the dress codes for the wedding! 👗✨\n\n${dressCodeLines.join("\n")}`;
+            return {
+              reply: dressCodeResponse,
+              nextState: callStatus,
+              actions: { updateDB: false, fields: {} },
+            };
+          }
+
+          // Last resort: return full KB
+          console.log("⚠️  No dress codes found, returning full KB");
+        }
+      }
+
+      // For all other queries, use AI to answer intelligently based on the specific question
+      console.log("🤖 Using AI to answer specific question from KB");
+      try {
+        const aiPrompt = `You are EventBot, a helpful wedding assistant. Answer the user's SPECIFIC question using the wedding information provided.
 
     User asked: "${userMessage}"
 
@@ -186,73 +203,80 @@
     Return ONLY valid JSON (no markdown, no code blocks):
     {"reply": "your focused answer here", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
 
-            const { text: raw } = await sendToClaude(
-              "Wedding Info Assistant",
-              [{ role: "user", content: aiPrompt }],
-              { 
-                model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514", 
-                temperature: 0.3,
-                max_tokens: 300 // Keep responses concise
-              }
-            );
+        const { text: raw } = await sendToClaude(
+          "Wedding Info Assistant",
+          [{ role: "user", content: aiPrompt }],
+          {
+            model: process.env.CLAUDE_MODEL || "claude-sonnet-5",
+            // temperature: 0.3,
+            max_tokens: 300, // Keep responses concise
+          },
+        );
 
-            console.log("🤖 AI raw response (first 200 chars):", raw?.substring(0, 200));
+        console.log(
+          "🤖 AI raw response (first 200 chars):",
+          raw?.substring(0, 200),
+        );
 
-            // Clean up response - remove markdown code blocks
-            let cleanedRaw = raw.trim();
-            cleanedRaw = cleanedRaw.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+        // Clean up response - remove markdown code blocks
+        let cleanedRaw = raw.trim();
+        cleanedRaw = cleanedRaw
+          .replace(/```json\s*/g, "")
+          .replace(/```\s*/g, "");
 
-            let parsed = {};
+        let parsed = {};
+        try {
+          parsed = JSON.parse(cleanedRaw);
+          console.log("✅ AI response parsed successfully");
+        } catch (e) {
+          console.warn("⚠️  First JSON parse failed, trying regex extraction");
+          const match = cleanedRaw.match(/\{[\s\S]*\}/);
+          if (match) {
             try {
-              parsed = JSON.parse(cleanedRaw);
-              console.log("✅ AI response parsed successfully");
-            } catch (e) {
-              console.warn("⚠️  First JSON parse failed, trying regex extraction");
-              const match = cleanedRaw.match(/\{[\s\S]*\}/);
-              if (match) {
-                try {
-                  parsed = JSON.parse(match[0]);
-                  console.log("✅ JSON extracted via regex");
-                } catch (e2) {
-                  throw new Error("Could not parse AI response as JSON");
-                }
-              } else {
-                throw new Error("No JSON found in AI response");
-              }
+              parsed = JSON.parse(match[0]);
+              console.log("✅ JSON extracted via regex");
+            } catch (e2) {
+              throw new Error("Could not parse AI response as JSON");
             }
-
-            // Validate the response has required fields
-            if (!parsed.reply || !parsed.nextState) {
-              console.warn("⚠️  Invalid AI response structure, using fallback");
-              throw new Error("AI response missing required fields");
-            }
-
-            return parsed;
-
-          } catch (err) {
-            console.error("❌ AI answer generation error:", err.message);
-            console.log("⚠️  Falling back to full KB content");
-            
-            // Fallback to full KB content
-            return {
-              reply: weddingInfo,
-              nextState: callStatus,
-              actions: { updateDB: false, fields: {} }
-            };
+          } else {
+            throw new Error("No JSON found in AI response");
           }
-        } else {
-          console.warn("⚠️  KB data was NULL - continuing with normal flow");
         }
-      } else if (needsWeddingInfo) {
-        console.warn("⚠️  KB ID not available - cannot fetch wedding info");
+
+        // Validate the response has required fields
+        if (!parsed.reply || !parsed.nextState) {
+          console.warn("⚠️  Invalid AI response structure, using fallback");
+          throw new Error("AI response missing required fields");
+        }
+
+        return parsed;
+      } catch (err) {
+        console.error("❌ AI answer generation error:", err.message);
+        console.log("⚠️  Falling back to full KB content");
+
+        // Fallback to full KB content
+        return {
+          reply: weddingInfo,
+          nextState: callStatus,
+          actions: { updateDB: false, fields: {} },
+        };
       }
+    } else {
+      console.warn("⚠️  KB data was NULL - continuing with normal flow");
+    }
+  } else if (needsWeddingInfo) {
+    console.warn("⚠️  KB ID not available - cannot fetch wedding info");
+  }
 
-      // Handle special button clicks
-      if (normalizedMessage === "wrong_response") context.userMessage = "__WRONG_RSVP__";
-      if (normalizedMessage === "change_mind") context.userMessage = "__CHANGE_RSVP__";
-      if (normalizedMessage === "add_doc_self") context.userMessage = "__ADD_DOC_SELF__";
+  // Handle special button clicks
+  if (normalizedMessage === "wrong_response")
+    context.userMessage = "__WRONG_RSVP__";
+  if (normalizedMessage === "change_mind")
+    context.userMessage = "__CHANGE_RSVP__";
+  if (normalizedMessage === "add_doc_self")
+    context.userMessage = "__ADD_DOC_SELF__";
 
-    const CORE_SYSTEM_PROMPT = `You are EventBot - a friendly, conversational AI assistant helping with RSVPs for a wedding event.
+  const CORE_SYSTEM_PROMPT = `You are EventBot - a friendly, conversational AI assistant helping with RSVPs for a wedding event.
 
     PERSONALITY:
     - Talk like a warm, helpful friend (not a robot!)
@@ -417,6 +441,10 @@
       - Move to awaiting_doc_role
       - Reply: "Got it! Adding [Name]'s details. What's their relation to you? Reply 1 for Self, 2 for Spouse, etc."
 
+    🚨 RESPECT "I DON'T HAVE IT" / DECLINES:
+If a user indicates — in ANY phrasing, not just exact keywords — that they don't have something, can't provide something, or have already said so more than once, STOP asking for that specific thing. Mark it as skipped/optional and move the conversation forward. Never make a user repeat a decline more than once. When in doubt, prioritize moving the conversation forward over collecting every possible field.
+
+
     🚨 TRAVEL DOCUMENT FLOW - CRITICAL RULES:
 
     1. AFTER ID PROOF UPLOADED:
@@ -491,17 +519,17 @@
 
     ALLOWED STATES: ${ALLOWED_STATES.join(", ")}`;
 
-      // ===== STATE-SPECIFIC INSTRUCTIONS =====
-      const stateInstruction = STATE_INSTRUCTIONS[callStatus] || "Handle user query naturally and warmly.";
+  // ===== STATE-SPECIFIC INSTRUCTIONS =====
+  const stateInstruction =
+    STATE_INSTRUCTIONS[callStatus] || "Handle user query naturally and warmly.";
 
-      // ===== FINAL SYSTEM PROMPT =====
-    const systemPrompt = `${CORE_SYSTEM_PROMPT}
+  // ===== FINAL SYSTEM PROMPT =====
+  const systemPrompt = `${CORE_SYSTEM_PROMPT}
 
     Current Task: ${stateInstruction}`;
 
-
-      // ===== OPTIMIZED USER PROMPT =====
-      const userPrompt = `
+  // ===== OPTIMIZED USER PROMPT =====
+  const userPrompt = `
     State: ${callStatus}
     User Message: "${userMessage}"
     ${participant?.full_name ? `Primary Participant: ${participant.full_name}` : ""}
@@ -519,9 +547,15 @@
     ${cache?.currentDoc?.returnDate ? `📝 return date collected: ${cache.currentDoc.returnDate}` : ""}
 
     Actually Uploaded Documents:
-    ${uploadedDocuments.length > 0 
-      ? uploadedDocuments.map(d => `- ${d.document_type} for ${d.participant_relatives_name} (${d.role})`).join("\n")
-      : "NONE - No documents have been uploaded yet"
+    ${
+      uploadedDocuments.length > 0
+        ? uploadedDocuments
+            .map(
+              (d) =>
+                `- ${d.document_type} for ${d.participant_relatives_name} (${d.role})`,
+            )
+            .join("\n")
+        : "NONE - No documents have been uploaded yet"
     }
 
     ${incomingMediaUrl ? "📎 Media Received: YES (document is being uploaded right now)" : "📎 Media Received: NO (no document in this message)"}
@@ -530,88 +564,110 @@
     When asking questions, ALWAYS use the name from "Collecting documents for: [NAME]" to make it clear whose information we're asking about. If name is the primary participant, use "you/your". If it's someone else, use their name explicitly.
     `.trim();
 
-      try {
-        // ===== API CALL =====
-        const { text: raw } = await sendToClaude(
-          systemPrompt,
-          [{ role: "user", content: userPrompt }],
-          { 
-            model: process.env.CLAUDE_MODEL || "claude-sonnet-4-20250514",
-            max_tokens: 500,
-            temperature: 0.0
-          }
-        );
+  try {
+    // ===== API CALL =====
+    const { text: raw } = await sendToClaude(
+      systemPrompt,
+      [{ role: "user", content: userPrompt }],
+      {
+        model: process.env.CLAUDE_MODEL || "claude-sonnet-5",
+        max_tokens: 2048,
+      },
+    );
 
-        const cleaned = (raw || "").trim();
+    const cleaned = (raw || "").trim();
+    console.log("🔎 RAW CLAUDE RESPONSE:", cleaned);
 
-        // Parse JSON response
-        let parsed = null;
+    // Strip markdown code fences (```json ... ``` or ``` ... ```) before parsing
+    const cleanedNoFences = cleaned
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/, "")
+      .replace(/```\s*$/, "")
+      .trim();
+
+    // Parse JSON response
+    let parsed = null;
+    try {
+      parsed = JSON.parse(cleanedNoFences);
+    } catch (e) {
+      console.warn("⚠️ First parse failed:", e.message);
+      const match = cleanedNoFences.match(/\{[\s\S]*\}$/);
+      if (match) {
         try {
-          parsed = JSON.parse(cleaned);
-          
-        } catch (e) {
-          const match = cleaned.match(/\{[\s\S]*\}$/);
-          if (match) {
-            try { parsed = JSON.parse(match[0]); } catch (_) { parsed = null; }
-          }
+          parsed = JSON.parse(match[0]);
+        } catch (_) {
+          parsed = null;
         }
-
-        if (!parsed || typeof parsed !== "object") {
-          throw new Error("AI returned invalid JSON");
-        }
-
-        // Ensure required shape
-        parsed.reply = parsed.reply || "Sorry, I didn't understand. Could you rephrase?";
-        parsed.nextState = ALLOWED_STATES.includes(parsed.nextState) ? parsed.nextState : callStatus;
-        parsed.actions = parsed.actions || { updateDB: false, fields: {} };
-
-        // Sanitize numeric fields
-        if (parsed.actions.fields?.number_of_guests !== undefined) {
-          const n = parseInt(parsed.actions.fields.number_of_guests, 10);
-          parsed.actions.fields.number_of_guests = isNaN(n) ? null : n;
-        }
-
-        // Auto-handle media uploads if AI missed it
-        const expectingUploadStates = ["awaiting_id_proof", "awaiting_travel_doc_upload"];
-        if (incomingMediaUrl && expectingUploadStates.includes(callStatus)) {
-          if (!parsed.actions.saveUpload || !parsed.actions.saveUpload.document_url) {
-            const docType = callStatus === "awaiting_id_proof" 
-              ? "ID Proof" 
-              : (cache?.currentDoc?.type || "Travel Document");
-            
-            parsed.actions.saveUpload = {
-              document_url: "MEDIA",
-              document_type: docType,
-              role: cache?.currentDoc?.role || "Self",
-              participant_relatives_name: cache?.currentDoc?.name || participant?.full_name || ""
-            };
-
-            if (callStatus === "awaiting_id_proof") {
-              parsed.actions.updateDB = true;
-              parsed.actions.fields = parsed.actions.fields || {};
-              parsed.actions.fields.proof_uploaded = true;
-            }
-          }
-        }
-
-        // ✅ MODE FLAG HANDLING - THIS IS THE ONLY NEW CODE!
-        if (mode === "test") {
-          console.log("🧪 TEST MODE - Disabling production side effects");
-          
-          // Disable all production DB writes and side effects
-          parsed.actions.updateDB = false;
-          parsed.actions.saveUpload = null;
-          
-          console.log("✅ TEST MODE - Response ready (no DB writes)");
-        }
-
-        return parsed;
-      } catch (err) {
-        console.error("❌ AI ERROR in decideNextStep:", err?.message || err);
-        return {
-          reply: "Sorry — I'm having trouble processing that. Could you repeat?",
-          nextState: callStatus,
-          actions: { updateDB: false, fields: {} }
-        };
       }
     }
+
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("AI returned invalid JSON");
+    }
+
+    // Ensure required shape
+    parsed.reply =
+      parsed.reply || "Sorry, I didn't understand. Could you rephrase?";
+    parsed.nextState = ALLOWED_STATES.includes(parsed.nextState)
+      ? parsed.nextState
+      : callStatus;
+    parsed.actions = parsed.actions || { updateDB: false, fields: {} };
+
+    // Sanitize numeric fields
+    if (parsed.actions.fields?.number_of_guests !== undefined) {
+      const n = parseInt(parsed.actions.fields.number_of_guests, 10);
+      parsed.actions.fields.number_of_guests = isNaN(n) ? null : n;
+    }
+
+    // Auto-handle media uploads if AI missed it
+    const expectingUploadStates = [
+      "awaiting_id_proof",
+      "awaiting_travel_doc_upload",
+    ];
+    if (incomingMediaUrl && expectingUploadStates.includes(callStatus)) {
+      if (
+        !parsed.actions.saveUpload ||
+        !parsed.actions.saveUpload.document_url
+      ) {
+        const docType =
+          callStatus === "awaiting_id_proof"
+            ? "ID Proof"
+            : cache?.currentDoc?.type || "Travel Document";
+
+        parsed.actions.saveUpload = {
+          document_url: "MEDIA",
+          document_type: docType,
+          role: cache?.currentDoc?.role || "Self",
+          participant_relatives_name:
+            cache?.currentDoc?.name || participant?.full_name || "",
+        };
+
+        if (callStatus === "awaiting_id_proof") {
+          parsed.actions.updateDB = true;
+          parsed.actions.fields = parsed.actions.fields || {};
+          parsed.actions.fields.proof_uploaded = true;
+        }
+      }
+    }
+
+    // ✅ MODE FLAG HANDLING - THIS IS THE ONLY NEW CODE!
+    if (mode === "test") {
+      console.log("🧪 TEST MODE - Disabling production side effects");
+
+      // Disable all production DB writes and side effects
+      parsed.actions.updateDB = false;
+      parsed.actions.saveUpload = null;
+
+      console.log("✅ TEST MODE - Response ready (no DB writes)");
+    }
+
+    return parsed;
+  } catch (err) {
+    console.error("❌ AI ERROR in decideNextStep:", err?.message || err);
+    return {
+      reply: "Sorry — I'm having trouble processing that. Could you repeat?",
+      nextState: callStatus,
+      actions: { updateDB: false, fields: {} },
+    };
+  }
+}

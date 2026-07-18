@@ -8,7 +8,7 @@ import { supabase } from "../config/supabase.js";
  */
 export async function getWeddingInfo(kbId) {
   console.log("🔍 getWeddingInfo called with kbId:", kbId);
-  
+
   if (!kbId) {
     console.warn("⚠️  No knowledge_base_id provided to getWeddingInfo");
     return null;
@@ -16,7 +16,7 @@ export async function getWeddingInfo(kbId) {
 
   try {
     console.log("📡 Querying Supabase for KB entries...");
-    
+
     // Fetch all KB entries for this knowledge base
     const { data: entries, error: kbError } = await supabase
       .from("knowledge_entries")
@@ -24,10 +24,10 @@ export async function getWeddingInfo(kbId) {
       .eq("knowledge_base_id", kbId)
       .order("created_at", { ascending: true });
 
-    console.log("📥 Supabase response:", { 
-      hasData: !!entries, 
+    console.log("📥 Supabase response:", {
+      hasData: !!entries,
       entryCount: entries?.length || 0,
-      hasError: !!kbError 
+      hasError: !!kbError,
     });
 
     if (kbError) {
@@ -38,17 +38,21 @@ export async function getWeddingInfo(kbId) {
 
     if (!entries || entries.length === 0) {
       console.warn(`⚠️  No KB entries found for knowledge_base_id: ${kbId}`);
-      console.warn("⚠️  Check if knowledge_entries table has data for this KB ID");
+      console.warn(
+        "⚠️  Check if knowledge_entries table has data for this KB ID",
+      );
       return null;
     }
 
     // Combine all entries into one string
-    const combinedContent = entries.map(e => e.content).join("\n\n");
-    
+    const combinedContent = entries.map((e) => e.content).join("\n\n");
+
     console.log(`✅ Successfully loaded ${entries.length} KB entries`);
-    console.log(`✅ Total content length: ${combinedContent.length} characters`);
+    console.log(
+      `✅ Total content length: ${combinedContent.length} characters`,
+    );
     console.log(`✅ First 200 chars: ${combinedContent.substring(0, 200)}...`);
-    
+
     return combinedContent;
   } catch (err) {
     console.error("❌ Exception in getWeddingInfo:", err);
@@ -284,6 +288,21 @@ If for someone else:
 
 CRITICAL HANDLING:
 
+0. RECOGNIZE "I DON'T HAVE IT" IN ANY PHRASING:
+   Treat ALL of these as "no document, don't have it, may never have it" — not just the exact words:
+   - "I'm not having it" / "I don't have it" / "I have not have this"
+   - "not having" / "no ticket" / "don't have the ticket"
+   - Any repeated variant of the above, even if worded differently each time
+   
+   When this happens:
+   - Do NOT ask for the file again after this point in the conversation.
+   - Ask ONCE if they'd like to share the date/time manually instead (optional, not required).
+   - If they decline that too, OR if they express frustration/repeat "I don't have it" a second time:
+     → IMMEDIATELY move to awaiting_more_attendees (or awaiting_more_travel_docs if mid-multi-attendee)
+     → Reply: "No problem at all! We'll leave {Name}'s return details blank for now — you can always update it later. Any other attendees?"
+     → Clear cache: cacheUpdate = null
+     → NEVER ask about this document again for the rest of the conversation.
+
 1. If user says "later", "I'll send later", "not now":
    - Reply: "No problem! Upload {Name}'s travel documents anytime. Let's continue! 😊"
    - Move to awaiting_more_attendees
@@ -420,11 +439,13 @@ Share the date like:
 - 22-12-2024"
 
 HANDLING:
+- If the user expresses they don't have the document/info at all (not just "haven't decided the date yet"), or repeats a "I don't have it" style message a second time in this sub-flow:
+  - Stop asking. Move to awaiting_more_attendees.
+  - Reply: "No worries! We'll leave that blank for now. Any other attendees?"
 - Parse date
 - Store in cacheUpdate.returnDate
 - Move to awaiting_return_manual_time
 - Reply: "Got it! Return: {parsed_date} 📅 What time?"
-
 Replace {Name} with cacheUpdate.currentDocName`,
 
   awaiting_return_manual_time: `Ask for return time:
@@ -517,13 +538,21 @@ HANDLING:
 3. If MAYBE:
    - Update fields.rsvp_status = "Maybe"
    - Move to completed
-   - Reply: "Updated to 'Maybe'. No rush - decide whenever you're ready! 😊"`
+   - Reply: "Updated to 'Maybe'. No rush - decide whenever you're ready! 😊"`,
 };
 
 // Random examples for variety
 export const EXAMPLE_VARIATIONS = {
   names: ["Ravi", "Priya", "Amit", "Sneha", "Rohan", "Kavya"],
   guest_counts: ["Just me!", "2 of us", "Family of 4", "Me and my partner (2)"],
-  notes: ["Vegetarian food please", "Need early check-in", "All good, no special requests"],
-  arrival: ["Flying in on 19th evening", "Driving down on 20th morning", "Train on 19th night"]
+  notes: [
+    "Vegetarian food please",
+    "Need early check-in",
+    "All good, no special requests",
+  ],
+  arrival: [
+    "Flying in on 19th evening",
+    "Driving down on 20th morning",
+    "Train on 19th night",
+  ],
 };

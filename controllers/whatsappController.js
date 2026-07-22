@@ -21,6 +21,11 @@ import {
 import { getUserById, updateUserCredits } from "../models/userModel.js";
 import { generalChatEngine } from "../utils/generalChatEngine.js";
 
+import {
+  saveUploadRow,
+  saveTravelItinerary,
+} from "../utils/documentStorage.js";
+
 const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
 const TEMPLATE_URL = process.env.TEMPLATE_BASE_URL;
@@ -128,112 +133,6 @@ async function deductProductionChatCredits(userId, context = {}) {
 }
 
 /* ---------------------------
-   Save Travel Itinerary Helper
-   --------------------------- */
-async function saveTravelItinerary({
-  participant_id,
-  upload_id,
-  event_id,
-  extractedData,
-  direction,
-  document_type = "ticket",
-  participant_relatives_name,
-}) {
-  try {
-    console.log("💾 Saving travel itinerary:", {
-      participant_id,
-      participant_relatives_name,
-      direction,
-      extractedData,
-    });
-
-    const { data: existing } = await supabase
-      .from("travel_itinerary")
-      .select("*")
-      .eq("participant_id", participant_id)
-      .eq("event_id", event_id)
-      .eq("participant_relatives_name", participant_relatives_name)
-      .maybeSingle();
-
-    const itineraryData = {
-      participant_id,
-      upload_id,
-      event_id,
-      participant_relatives_name,
-      document_type: document_type || "ticket",
-      raw_text_extracted: JSON.stringify(extractedData),
-      ai_json_extracted: extractedData,
-      direction,
-      updated_at: new Date().toISOString(),
-    };
-
-    if (direction === "arrival") {
-      itineraryData.arrival_date = extractedData.date || null;
-      itineraryData.arrival_time = extractedData.time || null;
-      itineraryData.arrival_transport_no =
-        extractedData.transport_number || null;
-    } else if (direction === "return") {
-      itineraryData.return_date = extractedData.date || null;
-      itineraryData.return_time = extractedData.time || null;
-      itineraryData.return_transport_no =
-        extractedData.transport_number || null;
-    }
-
-    if (existing) {
-      const updateFields = { ...itineraryData };
-      delete updateFields.participant_id;
-      delete updateFields.event_id;
-      delete updateFields.participant_relatives_name;
-
-      if (direction === "return" && existing.arrival_date) {
-        updateFields.arrival_date = existing.arrival_date;
-        updateFields.arrival_time = existing.arrival_time;
-        updateFields.arrival_transport_no = existing.arrival_transport_no;
-      }
-      if (direction === "arrival" && existing.return_date) {
-        updateFields.return_date = existing.return_date;
-        updateFields.return_time = existing.return_time;
-        updateFields.return_transport_no = existing.return_transport_no;
-      }
-
-      const { data: updated, error: updateError } = await supabase
-        .from("travel_itinerary")
-        .update(updateFields)
-        .eq("itinerary_id", existing.itinerary_id)
-        .select();
-
-      if (updateError) {
-        console.error("❌ Error updating travel_itinerary:", updateError);
-        return null;
-      }
-      console.log(
-        `✅ Travel itinerary updated for ${participant_relatives_name}:`,
-        updated,
-      );
-      return updated;
-    } else {
-      const { data: inserted, error: insertError } = await supabase
-        .from("travel_itinerary")
-        .insert(itineraryData)
-        .select();
-
-      if (insertError) {
-        console.error("❌ Error inserting travel_itinerary:", insertError);
-        return null;
-      }
-      console.log(
-        `✅ Travel itinerary created for ${participant_relatives_name}:`,
-        inserted,
-      );
-      return inserted;
-    }
-  } catch (err) {
-    console.error("❌ saveTravelItinerary error:", err);
-    return null;
-  }
-}
-
-/* ---------------------------
    Cache Helpers
    --------------------------- */
 function ensureCache(participant) {
@@ -337,40 +236,6 @@ async function uploadRemoteToBucket(
     return storagePath;
   } catch (err) {
     console.error("❌ uploadRemoteToBucket error:", err);
-    return null;
-  }
-}
-
-async function saveUploadRow({
-  participant_id,
-  participant_relatives_name,
-  document_url,
-  document_type,
-  role,
-}) {
-  try {
-    const { data, error } = await supabase
-      .from("uploads")
-      .insert({
-        participant_id,
-        participant_relatives_name: participant_relatives_name || null,
-        document_url: document_url || null,
-        document_type: document_type || "Document",
-        role: role || "Self",
-        proof_uploaded: true,
-        created_at: new Date().toISOString(),
-      })
-      .select();
-
-    if (error) {
-      console.error("❌ Error inserting upload row:", error);
-      return null;
-    }
-
-    console.log("✅ Upload row saved:", data);
-    return data;
-  } catch (err) {
-    console.error("❌ saveUploadRow error:", err);
     return null;
   }
 }
@@ -766,6 +631,9 @@ export const handleIncomingMessage = async (req, res) => {
         agentReply = await agentChatEngine({
           phoneNumber: from,
           userMessage: userText || "",
+          mediaUrl: publicUrl || null,
+          mediaType: incomingType,
+          storagePath: storedMediaPath || null, // ADD — this is the actual fix for this path
           eventId,
           participantId: participant.participant_id,
           guestName: displayName,
@@ -1494,10 +1362,65 @@ export const handleSamvaadikWebhook = async (req, res) => {
         console.log(
           `[samvaadikWebhook] 🤖 RSVP mode (smart_fields) — session ${activeSession.session_id}`,
         );
+
+        // NEW — re-upload the media into OUR OWN participant-docs bucket before
+        // handing off to the engine, exactly like the classic branch below
+        // already does. Without this, uploads.document_url ends up pointing at
+        // Samvaadik's bucket instead of ours, and the Document Viewer's
+        // signed-url endpoint fails with "Object not found" — it can only sign
+        // paths that actually live in participant-docs.
+        let smartStoredMediaPath = null;
+        if (incomingType !== "text" && req.body.media_url) {
+          try {
+            console.log(
+              "📤 [smart_fields] Downloading media from Samvaadik URL...",
+            );
+            const resp = await fetch(req.body.media_url);
+            if (!resp.ok) throw new Error(`Fetch failed: ${resp.status}`);
+            const buffer = Buffer.from(await resp.arrayBuffer());
+            const ts = Date.now();
+            const urlParts = req.body.media_url.split("/");
+            const origFilename =
+              urlParts[urlParts.length - 1] || `document_${ts}`;
+            const storagePath = `${pid}/${eventId}/${ts}_${origFilename}`;
+
+            const { error: uploadError } = await supabase.storage
+              .from("participant-docs")
+              .upload(storagePath, buffer, {
+                contentType:
+                  resp.headers.get("content-type") ||
+                  "application/octet-stream",
+                upsert: false,
+              });
+
+            if (uploadError) {
+              console.error(
+                "❌ [smart_fields] Supabase upload error:",
+                uploadError,
+              );
+            } else {
+              smartStoredMediaPath = storagePath;
+              console.log(
+                "✅ [smart_fields] Media stored at:",
+                smartStoredMediaPath,
+              );
+            }
+          } catch (err) {
+            console.error(
+              "❌ [smart_fields] Failed to download/store Samvaadik media:",
+              err.message,
+            );
+          }
+        }
+
         try {
           agentReply = await agentChatEngine({
             phoneNumber: normalised,
             userMessage: userText,
+            mediaUrl:
+              incomingType !== "text" ? req.body.media_url || null : null,
+            mediaType: incomingType,
+            storagePath: smartStoredMediaPath, // NEW
             eventId,
             participantId: pid,
             guestName: displayName,

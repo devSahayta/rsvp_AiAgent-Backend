@@ -5,15 +5,16 @@
 // Flow per turn:
 //   1. Load session + smart fields
 //   2. Check if all fields done → close session
-//   3. Build system prompt for current field
-//   4. Call Claude API with full conversation history
-//   5. Parse FIELD_COLLECTED signal
-//   6. Advance session or retry
-//   7. Return reply to send to guest
+//   3. If current field is document/travel_ticket → handle deterministically
+//      (bypasses Claude entirely — file handling doesn't need an LLM)
+//   4. Otherwise: build system prompt for current field, call Claude,
+//      parse FIELD_COLLECTED signal, advance or retry
+//   5. Return reply to send to guest
 
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
 import { buildSystemPrompt } from "./smartFieldsPromptBuilder.js";
+import { handleDocumentField } from "./smartDocumentHandler.js";
 import {
   lookupSessionByPhone,
   advanceSession,
@@ -23,14 +24,12 @@ import {
 
 const ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages";
 
-/**
- * Parse FIELD_COLLECTED signal from Claude's raw response.
- * Returns { field_key, value } or null.
- */
+// Field types handled deterministically, without calling Claude.
+const DOCUMENT_FIELD_TYPES = new Set(["document", "travel_ticket"]);
+
 function parseFieldCollected(rawReply) {
   const match = rawReply.match(/FIELD_COLLECTED:\s*(\{[^}]+\})/);
   if (!match) return null;
-
   try {
     return JSON.parse(match[1]);
   } catch {
@@ -42,44 +41,60 @@ function parseFieldCollected(rawReply) {
   }
 }
 
-/**
- * Strip FIELD_COLLECTED signal from reply before sending to guest.
- */
 function cleanReply(rawReply) {
   return rawReply.replace(/\nFIELD_COLLECTED:.*$/m, "").trim();
 }
 
-/**
- * Check if a field should be skipped based on its condition.
- * e.g. condition: { field: "attendance", value: "yes" }
- */
 function shouldSkipField(field, collectedAnswers) {
   if (!field.condition) return false;
-
   const { field: condField, value: condValue } = field.condition;
   const actualValue = String(collectedAnswers[condField] || "").toLowerCase();
   const expectedValue = String(condValue).toLowerCase();
-
-  // Skip if condition NOT met
   return actualValue !== expectedValue;
 }
 
 /**
- * Main engine function.
- *
- * @param {object} params
- * @param {string} params.phoneNumber    — normalised phone (no +)
- * @param {string} params.userMessage   — incoming text from guest
- * @param {string} params.eventId
- * @param {string} params.participantId
- * @param {string} params.guestName
- * @param {object} params.event          — full event row
- *
- * @returns {string} reply to send back to the guest
+ * Build the "here's what to answer" prompt text for a field, for use when
+ * we need to hand off to the next field OURSELVES (i.e. the previous turn
+ * didn't go through Claude, so nothing asked it automatically the way
+ * Claude does via the "move on smoothly" instruction in buildSystemPrompt).
  */
+function buildFieldPrompt(field) {
+  if (field.field_type === "travel_ticket") {
+    return `${field.ai_question}\n\nPlease send your Arrival ticket first 📤`;
+  }
+  if (field.field_type === "document") {
+    return `${field.ai_question} 📤`;
+  }
+  if (field.field_type === "choice" && field.options?.length) {
+    return `${field.ai_question} (${field.options.join(" / ")})`;
+  }
+  return field.ai_question;
+}
+
+/**
+ * Persist field_state directly (transient sub-step tracking for multi-step
+ * field types like travel_ticket). Direct supabase call rather than routing
+ * through sessionManager.js so that file doesn't need touching — move this
+ * into sessionManager.js as `updateFieldState()` later if you'd rather keep
+ * all session writes in one place.
+ */
+async function updateFieldState(sessionId, fieldState) {
+  const { error } = await supabase
+    .from("whatsapp_ai_sessions")
+    .update({ field_state: fieldState })
+    .eq("session_id", sessionId);
+  if (error) {
+    console.error("[agentChatEngine] Failed to update field_state:", error);
+  }
+}
+
 export const agentChatEngine = async ({
   phoneNumber,
   userMessage,
+  mediaUrl = null, // fetchable URL for OCR extraction (Samvaadik raw URL or signed WA URL)
+  mediaType = null, // e.g. 'image' | 'document' | 'text'
+  storagePath = null, // NEW — bucket-relative path in `participant-docs`, used as the stored document_url so Document Viewer works the same as classic
   eventId,
   participantId,
   guestName,
@@ -93,7 +108,7 @@ export const agentChatEngine = async ({
       console.warn(
         `[agentChatEngine] No active session for phone ${phoneNumber}`,
       );
-      return null; // caller falls back to existing decideNextStep
+      return null;
     }
 
     // ── 2. Load smart fields for this event ────────────────────────────────
@@ -112,6 +127,7 @@ export const agentChatEngine = async ({
     }
 
     let { current_index, collected_answers, conversation_history } = session;
+    const fieldState = session.field_state || {};
     conversation_history = Array.isArray(conversation_history)
       ? conversation_history
       : [];
@@ -129,14 +145,12 @@ export const agentChatEngine = async ({
 
     // ── 4. Check if all fields done ────────────────────────────────────────
     if (current_index >= smartFields.length) {
-      // All done — close session and send completion message
       await closeSession(
         session.session_id,
         eventId,
         participantId,
         collected_answers,
       );
-
       const eventName = event?.event_name || "the event";
       return `Thank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you! If you have any questions, feel free to reach out.`;
     }
@@ -147,16 +161,83 @@ export const agentChatEngine = async ({
     ).length;
 
     console.log(
-      `[agentChatEngine] Turn: participant=${participantId} field="${currentField.field_key}" index=${current_index}/${smartFields.length}`,
+      `[agentChatEngine] Turn: participant=${participantId} field="${currentField.field_key}" (${currentField.field_type}) index=${current_index}/${smartFields.length}`,
     );
 
-    // ── 5. Append user message to history ──────────────────────────────────
+    // ── 5. Document / travel_ticket fields skip Claude entirely ────────────
+    if (DOCUMENT_FIELD_TYPES.has(currentField.field_type)) {
+      const result = await handleDocumentField({
+        field: currentField,
+        mediaUrl,
+        storagePath, // NEW
+        userMessage, // NEW — needed for skip-intent detection
+        fieldState,
+        participantId,
+        eventId,
+        guestName,
+      });
+
+      const historyWithReply = [
+        ...conversation_history,
+        { role: "user", content: userMessage || "[media]" },
+        { role: "assistant", content: result.reply },
+      ];
+
+      if (!result.collected) {
+        // Still mid-sequence (e.g. arrival done, waiting on return) —
+        // persist field_state, keep index the same.
+        await updateFieldState(session.session_id, result.newFieldState);
+        await updateHistory(session.session_id, historyWithReply);
+        return result.reply;
+      }
+
+      // ── Field fully collected — advance index, clear field_state ─────────
+      const newIndex = current_index + 1;
+      await advanceSession(session.session_id, {
+        field_key: currentField.field_key,
+        value: result.value,
+        newIndex,
+        updatedHistory: historyWithReply,
+      });
+      await updateFieldState(session.session_id, {});
+
+      let nextIndex = newIndex;
+      const updatedAnswers = {
+        ...collected_answers,
+        [currentField.field_key]: result.value,
+      };
+      while (
+        nextIndex < smartFields.length &&
+        shouldSkipField(smartFields[nextIndex], updatedAnswers)
+      ) {
+        nextIndex++;
+      }
+
+      if (nextIndex >= smartFields.length) {
+        await closeSession(
+          session.session_id,
+          eventId,
+          participantId,
+          updatedAnswers,
+        );
+        const eventName = event?.event_name || "the event";
+        return `${result.reply}\n\nThank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you!`;
+      }
+
+      // NEW — since this turn never went through Claude, nothing has asked
+      // the next question yet (Claude's turns handle this themselves via
+      // the "move on smoothly" instruction in buildSystemPrompt; this
+      // deterministic branch has to do it explicitly instead).
+      const nextField = smartFields[nextIndex];
+      return `${result.reply}\n\n${buildFieldPrompt(nextField)}`;
+    }
+
+    // ── 6. Standard fields (yes_no/number/text/choice) — existing Claude flow ──
     const updatedHistory = [
       ...conversation_history,
       { role: "user", content: userMessage },
     ];
 
-    // ── 6. Build system prompt ─────────────────────────────────────────────
     const systemPrompt = await buildSystemPrompt({
       eventName: event?.event_name || "the event",
       guestName,
@@ -165,11 +246,9 @@ export const agentChatEngine = async ({
       collectedAnswers: collected_answers,
       totalFields,
       currentIndex: current_index,
-      allFields: smartFields, // ← pass ALL fields so Claude knows what it's allowed to ask
+      allFields: smartFields,
     });
 
-    // ── 7. Call Claude API ─────────────────────────────────────────────────
-    // ── 7. Call Claude API ─────────────────────────────────────────────────
     const claudeResponse = await axios.post(
       ANTHROPIC_API_URL,
       {
@@ -192,20 +271,15 @@ export const agentChatEngine = async ({
       `[agentChatEngine] Claude raw reply: ${rawReply.slice(0, 200)}`,
     );
 
-    // ── 8. Parse FIELD_COLLECTED signal ────────────────────────────────────
     const signal = parseFieldCollected(rawReply);
     const reply = cleanReply(rawReply);
 
-    // Append Claude reply to history
     const historyWithReply = [
       ...updatedHistory,
       { role: "assistant", content: reply },
     ];
 
     if (signal?.field_key && signal?.value !== undefined) {
-      // ── 9a. Answer collected ──────────────────────────────────────────────
-      // If signal is for the CURRENT field → advance index
-      // If signal is a CORRECTION of a previous field → update answer, keep index
       const isCurrentField = signal.field_key === currentField.field_key;
       const newIndex = isCurrentField ? current_index + 1 : current_index;
 
@@ -220,7 +294,6 @@ export const agentChatEngine = async ({
         updatedHistory: historyWithReply,
       });
 
-      // Check if this was the last field after advancing
       let nextIndex = newIndex;
       const updatedAnswers = {
         ...collected_answers,
@@ -235,7 +308,6 @@ export const agentChatEngine = async ({
       }
 
       if (nextIndex >= smartFields.length) {
-        // All done after this answer
         await closeSession(
           session.session_id,
           eventId,
@@ -246,12 +318,18 @@ export const agentChatEngine = async ({
         const completionMsg = `${reply}\n\nThank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you!`;
         return completionMsg;
       }
+
+      // NEW — if we just advanced INTO a document/travel_ticket field from
+      // a Claude-handled field, Claude's reply (built from the OLD field's
+      // prompt) won't have asked for the document — append that prompt now.
+      const nextField = smartFields[nextIndex];
+      if (isCurrentField && DOCUMENT_FIELD_TYPES.has(nextField.field_type)) {
+        return `${reply}\n\n${buildFieldPrompt(nextField)}`;
+      }
     } else {
-      // ── 9b. No answer collected — retry or KB answer, same index ─────────
       console.log(
         `[agentChatEngine] ℹ️ No FIELD_COLLECTED signal — retrying field "${currentField.field_key}"`,
       );
-
       await updateHistory(session.session_id, historyWithReply);
     }
 

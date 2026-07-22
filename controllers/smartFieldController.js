@@ -28,27 +28,42 @@ export const getEventSmartFields = async (req, res) => {
 
 /**
  * GET /api/events/:eventId/smart-rsvp-data
- * Returns field definitions (headers) + per-participant responses + call log data.
+ * Returns field definitions (headers) + per-participant responses + call log
+ * data + extracted travel itinerary data.
+ *
+ * REPLACES the previous version of this function in smartFieldController.js.
+ * Everything else in that file (getEventSmartFields, saveRsvpResponses) stays
+ * exactly as-is — only this one function changes.
+ *
+ * NOTE: no longer resolves per-field document URLs here — the frontend links
+ * straight to the existing /document-viewer/:participantId page (same one
+ * classic uses), which already fetches every upload for a participant via
+ * GET /api/uploads/:participantId with proper signed-URL auth. Keeping that
+ * as the single source of truth for file viewing instead of duplicating it.
  */
 export const getSmartRsvpData = async (req, res) => {
   try {
     const { eventId } = req.params;
 
+    const { data: participants, error: pError } = await supabase
+      .from("participants")
+      .select("participant_id, full_name, phone_number, uploaded_at")
+      .eq("event_id", eventId);
+    if (pError) throw pError;
+
+    const participantIds = (participants || []).map((p) => p.participant_id);
+
     const [
       { data: smartFields, error: sfError },
-      { data: participants, error: pError },
       { data: responses, error: rError },
       { data: callLogs, error: clError },
+      { data: itineraries, error: itError },
     ] = await Promise.all([
       supabase
         .from("event_smart_fields")
         .select("*")
         .eq("event_id", eventId)
         .order("display_order", { ascending: true }),
-      supabase
-        .from("participants")
-        .select("participant_id, full_name, phone_number, uploaded_at")
-        .eq("event_id", eventId),
       supabase
         .from("event_rsvp_responses")
         .select("participant_id, field_key, response_value")
@@ -59,12 +74,20 @@ export const getSmartRsvpData = async (req, res) => {
           "participant_id, conversation_id, call_duration, call_outcome, called_at, recipient_status",
         )
         .eq("event_id", eventId),
+      // NEW — extracted travel itinerary data for this event's participants
+      participantIds.length
+        ? supabase
+            .from("travel_itinerary")
+            .select("*")
+            .eq("event_id", eventId)
+            .in("participant_id", participantIds)
+        : Promise.resolve({ data: [] }),
     ]);
 
     if (sfError) throw sfError;
-    if (pError) throw pError;
     if (rError) throw rError;
     if (clError) throw clError;
+    if (itError) throw itError;
 
     // Group responses by participant_id → { field_key: response_value }
     const byParticipant = {};
@@ -80,9 +103,17 @@ export const getSmartRsvpData = async (req, res) => {
       callLogByParticipant[log.participant_id] = log;
     });
 
+    // NEW — index itineraries by participant_id (one row per participant
+    // per event, per your travel_itinerary upsert logic)
+    const itineraryByParticipant = {};
+    (itineraries || []).forEach((it) => {
+      itineraryByParticipant[it.participant_id] = it;
+    });
+
     const data = (participants || []).map((p) => {
       const participantResponses = byParticipant[p.participant_id] || {};
       const callLog = callLogByParticipant[p.participant_id] || {};
+      const itinerary = itineraryByParticipant[p.participant_id] || null;
 
       const row = {
         id: p.participant_id,
@@ -98,6 +129,18 @@ export const getSmartRsvpData = async (req, res) => {
 
       (smartFields || []).forEach((f) => {
         row[f.field_key] = participantResponses[f.field_key] ?? null;
+
+        // NEW — resolve extracted itinerary data for travel_ticket fields
+        if (f.field_type === "travel_ticket") {
+          row[`${f.field_key}_arrival_date`] = itinerary?.arrival_date || null;
+          row[`${f.field_key}_arrival_time`] = itinerary?.arrival_time || null;
+          row[`${f.field_key}_arrival_transport_no`] =
+            itinerary?.arrival_transport_no || null;
+          row[`${f.field_key}_return_date`] = itinerary?.return_date || null;
+          row[`${f.field_key}_return_time`] = itinerary?.return_time || null;
+          row[`${f.field_key}_return_transport_no`] =
+            itinerary?.return_transport_no || null;
+        }
       });
 
       return row;
@@ -329,7 +372,10 @@ export const saveRsvpResponses = async (req, res) => {
           answered: true,
         });
       } catch (followupErr) {
-        console.warn("Follow-up dispatch failed (non-fatal):", followupErr.message);
+        console.warn(
+          "Follow-up dispatch failed (non-fatal):",
+          followupErr.message,
+        );
       }
     }
 

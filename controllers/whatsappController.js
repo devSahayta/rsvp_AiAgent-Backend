@@ -30,6 +30,23 @@ const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
 const TEMPLATE_URL = process.env.TEMPLATE_BASE_URL;
 
+// ← ADD THIS LINE
+const batchJobs = new Map();
+
+function updateJob(batchId, patch) {
+  const job = batchJobs.get(batchId) || {};
+  batchJobs.set(batchId, { ...job, ...patch });
+}
+
+function updateParticipant(batchId, participantId, patch) {
+  const job = batchJobs.get(batchId) || { participants: {} };
+  const participants = {
+    ...(job.participants || {}),
+    [participantId]: { ...(job.participants?.[participantId] || {}), ...patch },
+  };
+  batchJobs.set(batchId, { ...job, participants });
+}
+
 // Persistent conversation cache for Samvaadik classic-mode doc collection
 // (mirrors the same pattern used in handleIncomingMessage)
 const samvaadikConvoCache = new Map();
@@ -1805,6 +1822,8 @@ export async function sendSamvaadikTemplateToParticipants(
   templateName,
   languageCode = "en",
   templateBodyText = null,
+  onProgress = () => {},
+  onParticipantUpdate = () => {}, // ← ADD THIS
 ) {
   if (!eventId || !templateName) {
     throw new Error("eventId and templateName are required");
@@ -1863,85 +1882,113 @@ export async function sendSamvaadikTemplateToParticipants(
   if (!targets.length)
     throw new Error("None of the selected participants found");
 
+  // ← ADD THIS BLOCK — seed every target as "pending" so the frontend
+  // can render the full manifest immediately, before any sends happen
+  targets.forEach((p) => {
+    onParticipantUpdate(p.participant_id, {
+      name: p.full_name?.trim() || "Guest",
+      phone: p.phone_number,
+      status: "pending",
+    });
+  });
+
   const results = { sent: 0, failed: 0, errors: [] };
+  const CONCURRENCY = 5; // tune based on Samvaadik's rate limits
 
-  for (const participant of targets) {
-    try {
-      const phone = String(participant.phone_number).replace(/\D/g, "");
-      const normalised = phone.startsWith("+") ? phone.replace("+", "") : phone;
-      const displayPhone = `+${normalised}`;
-      const name = participant.full_name?.trim() || "Guest";
+  for (let i = 0; i < targets.length; i += CONCURRENCY) {
+    const chunk = targets.slice(i, i + CONCURRENCY);
 
-      await axios.post(
-        `${process.env.SAMVAADIK_BASE_URL}/messages/template`,
-        {
-          phone: displayPhone,
-          template_name: templateName,
-          language_code: languageCode,
-          components: [
-            { type: "body", parameters: [{ type: "text", text: name }] },
-          ],
-        },
-        {
-          headers: {
-            "X-API-Key": conn.api_key,
-            "Content-Type": "application/json",
-          },
-          timeout: 10000,
-        },
-      );
+    await Promise.allSettled(
+      chunk.map(async (participant) => {
+        const name = participant.full_name?.trim() || "Guest";
+        onParticipantUpdate(participant.participant_id, {
+          name,
+          status: "sending",
+        }); // ← ADD THIS
 
-      // Close any other non-closed session for this phone number, from any
-      // other event — sending a new template always makes THIS event's
-      // agent the active one going forward, whether classic or smart_fields.
-      await supabase
-        .from("whatsapp_ai_sessions")
-        .update({ status: "closed", completed_at: new Date().toISOString() })
-        .eq("phone_number", normalised)
-        .neq("status", "closed");
+        try {
+          const phone = String(participant.phone_number).replace(/\D/g, "");
+          const normalised = phone.startsWith("+")
+            ? phone.replace("+", "")
+            : phone;
+          const displayPhone = `+${normalised}`;
+          // (delete the now-duplicate "const name = ..." line below, since it moved up)
 
-      await createSession({
-        event_id: eventId,
-        participant_id: participant.participant_id,
-        phone_number: normalised,
-        triggered_by: "batch_template",
-      });
+          await axios.post(
+            `${process.env.SAMVAADIK_BASE_URL}/messages/template`,
+            {
+              phone: displayPhone,
+              template_name: templateName,
+              language_code: languageCode,
+              components: [
+                { type: "body", parameters: [{ type: "text", text: name }] },
+              ],
+            },
+            {
+              headers: {
+                "X-API-Key": conn.api_key,
+                "Content-Type": "application/json",
+              },
+              timeout: 10000,
+            },
+          );
 
-      // ← the fix: upsert-by-phone instead of chatCtrl.ensureChat
-      const chat = await upsertAutomationChat({
-        event_id: eventId,
-        phone_number: normalised,
-        person_name: name,
-        user_id: event.user_id,
-      });
+          await supabase
+            .from("whatsapp_ai_sessions")
+            .update({
+              status: "closed",
+              completed_at: new Date().toISOString(),
+            })
+            .eq("phone_number", normalised)
+            .neq("status", "closed");
 
-      // Render the real message content the participant actually received,
-      // not a placeholder — {{1}} is the only variable we currently send
-      // (the participant's name, matching the `components` payload above).
-      const renderedMessage = templateBodyText
-        ? templateBodyText.replace(/\{\{\s*1\s*\}\}/g, name)
-        : `[Template: ${templateName}] Sent to ${name}`; // fallback if body text wasn't supplied
+          await createSession({
+            event_id: eventId,
+            participant_id: participant.participant_id,
+            phone_number: normalised,
+            triggered_by: "batch_template",
+          });
 
-      await chatCtrl.saveMessage({
-        chat_id: chat.chat_id,
-        sender_type: "ai",
-        message: renderedMessage,
-        message_type: "template",
-        media_path: null,
-      });
+          const chat = await upsertAutomationChat({
+            event_id: eventId,
+            phone_number: normalised,
+            person_name: name,
+            user_id: event.user_id,
+          });
 
-      results.sent++;
-    } catch (err) {
-      results.failed++;
-      const errMsg = err.response?.data?.message || err.message;
-      results.errors.push(
-        `${participant.full_name} (${participant.phone_number}): ${errMsg}`,
-      );
-      console.error(
-        `[sendSamvaadikTemplateToParticipants] ❌ Failed for ${participant.full_name}:`,
-        errMsg,
-      );
-    }
+          const renderedMessage = templateBodyText
+            ? templateBodyText.replace(/\{\{\s*1\s*\}\}/g, name)
+            : `[Template: ${templateName}] Sent to ${name}`;
+
+          await chatCtrl.saveMessage({
+            chat_id: chat.chat_id,
+            sender_type: "ai",
+            message: renderedMessage,
+            message_type: "template",
+            media_path: null,
+          });
+
+          results.sent++;
+          onParticipantUpdate(participant.participant_id, { status: "sent" }); // ← ADD THIS
+        } catch (err) {
+          results.failed++;
+          const errMsg = err.response?.data?.message || err.message;
+          results.errors.push(
+            `${participant.full_name} (${participant.phone_number}): ${errMsg}`,
+          );
+          onParticipantUpdate(participant.participant_id, {
+            status: "failed",
+            error: errMsg,
+          }); // ← ADD THIS
+          console.error(
+            `[sendSamvaadikTemplateToParticipants] ❌ Failed for ${participant.full_name}:`,
+            errMsg,
+          );
+        }
+      }),
+    );
+
+    onProgress({ ...results, total: targets.length });
   }
 
   return { total: targets.length, ...results };
@@ -2005,37 +2052,64 @@ async function upsertAutomationChat({
   return inserted;
 }
 export const sendSamvaadikBatch = async (req, res) => {
-  try {
-    const {
-      event_id,
-      template_name,
-      language_code = "en",
-      template_body = null,
-      participant_ids,
-    } = req.body;
-    if (!event_id || !template_name) {
-      return res
-        .status(400)
-        .json({ error: "event_id and template_name are required" });
-    }
-    const result = await sendSamvaadikTemplateToParticipants(
-      event_id,
-      participant_ids,
-      template_name,
-      language_code,
-      template_body,
-    );
-    return res.json({
-      success: true,
-      event_id,
-      template: template_name,
-      ...result,
-      message: `${result.sent}/${result.total} messages sent. Chatbot is now active for replies.`,
-    });
-  } catch (err) {
-    console.error("[sendSamvaadikBatch] Error:", err.message);
-    return res.status(500).json({ error: "Batch send failed: " + err.message });
+  const {
+    event_id,
+    template_name,
+    language_code = "en",
+    template_body = null,
+    participant_ids,
+  } = req.body;
+
+  if (!event_id || !template_name) {
+    return res
+      .status(400)
+      .json({ error: "event_id and template_name are required" });
   }
+
+  const batchId = `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  batchJobs.set(batchId, {
+    status: "processing",
+    sent: 0,
+    failed: 0,
+    total: 0,
+    errors: [],
+    participants: {}, // ← ADD THIS
+  });
+
+  // Respond immediately so the HTTP request never times out waiting on the loop
+  res.json({ success: true, batch_id: batchId, status: "processing" });
+
+  // Everything below runs AFTER the response has already been sent
+  sendSamvaadikTemplateToParticipants(
+    event_id,
+    participant_ids,
+    template_name,
+    language_code,
+    template_body,
+    (progress) => updateJob(batchId, { status: "processing", ...progress }),
+    (participantId, patch) => updateParticipant(batchId, participantId, patch), // ← ADD THIS
+  )
+    .then((result) => {
+      updateJob(batchId, {
+        status: "done",
+        ...result,
+        message: `${result.sent}/${result.total} messages sent. Chatbot is now active for replies.`,
+      });
+    })
+    .catch((err) => {
+      console.error("[sendSamvaadikBatch] background error:", err.message);
+      updateJob(batchId, { status: "error", error: err.message });
+    });
+};
+
+export const getSamvaadikBatchStatus = (req, res) => {
+  const job = batchJobs.get(req.params.batchId);
+  if (!job) return res.status(404).json({ error: "Batch not found" });
+
+  const participants = Object.entries(job.participants || {}).map(
+    ([id, p]) => ({ id, ...p }),
+  );
+  return res.json({ ...job, participants });
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -59,12 +59,26 @@ async function callClaude({ system, messages, maxTokens = 600 }) {
 async function fetchKBContent(knowledgeBaseId) {
   if (!knowledgeBaseId) return null;
   try {
-    const { data: kb } = await supabase
-      .from("knowledge_bases")
-      .select("name, content, elevenlabs_kb_id")
-      .eq("id", knowledgeBaseId)
-      .single();
-    return kb?.content || null;
+    const { data: entries, error } = await supabase
+      .from("knowledge_entries")
+      .select("*")
+      .eq("knowledge_base_id", knowledgeBaseId)
+      .order("created_at", { ascending: true });
+
+    if (error || !entries?.length) return null;
+
+    // Tolerant of either shape your knowledge_entries rows might use —
+    // a single `content` blob, or `question`/`answer` pairs — since your
+    // codebase currently has both patterns in different files.
+    return entries
+      .map((e) => {
+        if (e.content) return e.content;
+        if (e.question || e.answer)
+          return `Q: ${e.question || ""}\nA: ${e.answer || ""}`;
+        return null;
+      })
+      .filter(Boolean)
+      .join("\n\n---\n\n");
   } catch {
     return null;
   }

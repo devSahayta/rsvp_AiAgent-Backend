@@ -537,12 +537,36 @@ export async function executeToolCall(toolName, toolInput, userId) {
         success: true,
         action_type: "create_template_wizard",
         steps: [
-          { step: 1, title: "Template Type", description: "Text-only or media (image/video/document) header" },
-          { step: 2, title: "Basic Info", description: "Name, category and language" },
-          { step: 3, title: "Body", description: "Message body text and variables" },
-          { step: 4, title: "Header / Media", description: "Optional header text, or attach image/video/document" },
-          { step: 5, title: "Footer & Buttons", description: "Optional footer text and up to 3 buttons" },
-          { step: 6, title: "Review & Create", description: "Confirm and submit to Meta for approval" },
+          {
+            step: 1,
+            title: "Template Type",
+            description: "Text-only or media (image/video/document) header",
+          },
+          {
+            step: 2,
+            title: "Basic Info",
+            description: "Name, category and language",
+          },
+          {
+            step: 3,
+            title: "Body",
+            description: "Message body text and variables",
+          },
+          {
+            step: 4,
+            title: "Header / Media",
+            description: "Optional header text, or attach image/video/document",
+          },
+          {
+            step: 5,
+            title: "Footer & Buttons",
+            description: "Optional footer text and up to 3 buttons",
+          },
+          {
+            step: 6,
+            title: "Review & Create",
+            description: "Confirm and submit to Meta for approval",
+          },
         ],
         message: "wizard_started",
       };
@@ -697,6 +721,11 @@ export async function executeToolCall(toolName, toolInput, userId) {
           },
           {
             step: 5,
+            title: "Voice",
+            description: "Optionally preview and pick a voice",
+          },
+          {
+            step: 6,
             title: "Review & Create",
             description: "Confirm everything and create the agent",
           },
@@ -723,19 +752,44 @@ export async function executeToolCall(toolName, toolInput, userId) {
     }
 
     case "get_knowledge_bases": {
-      const { data: kbs, error } = await supabase
+      const { field_mode } = toolInput; // pass this in from assistantTools.js schema
+      let query = supabase
         .from("knowledge_bases")
-        .select("id, name, created_at")
+        .select("id, name, elevenlabs_kb_id, created_at")
         .eq("user_id", userId)
         .order("created_at", { ascending: false })
         .limit(10);
+      const { data: kbs, error } = await query;
 
       if (error)
         throw new Error(`Failed to fetch knowledge bases: ${error.message}`);
+      const usable =
+        field_mode === "classic"
+          ? kbs.filter((k) => !!k.elevenlabs_kb_id)
+          : kbs;
       return {
         success: true,
-        count: kbs.length,
-        knowledge_bases: kbs.map((k) => ({ id: k.id, name: k.name })),
+        count: usable.length,
+        knowledge_bases: usable.map((k) => ({ id: k.id, name: k.name })),
+      };
+    }
+
+    // ── Voice selection ─────────────────────────────────────────────────────
+    // The frontend VoiceSelectionCard fetches /api/voices itself — same
+    // endpoint, same params, same Indian-voice filtering the manual
+    // CreateAgent page's VoiceSelector.jsx uses — so results are guaranteed
+    // identical to the manual flow. This tool only passes the filters
+    // Claude gathered from the conversation through to the UI.
+    case "get_voice_options": {
+      const { gender, search } = toolInput;
+      return {
+        success: true,
+        action_type: "voice_selection",
+        filters: {
+          gender: gender || null,
+          search: search || null,
+        },
+        message: "Voice options ready — shown below.",
       };
     }
 
@@ -751,6 +805,9 @@ export async function executeToolCall(toolName, toolInput, userId) {
         kb_content,
         kb_id,
         smart_fields = [],
+        voice_id,
+        voice_name,
+        public_owner_id,
       } = toolInput;
 
       const backendUrl = process.env.BACKEND_URL || "http://localhost:5000";
@@ -773,6 +830,7 @@ export async function executeToolCall(toolName, toolInput, userId) {
             user_id: userId,
             name: kb_name,
             content: kb_content,
+            field_mode,
           }),
         });
         const kbData = await kbRes.json();
@@ -792,6 +850,9 @@ export async function executeToolCall(toolName, toolInput, userId) {
         agent_description,
         knowledge_base_id: knowledgeBaseId,
         field_mode,
+        voice_id: voice_id || null,
+        voice_name: voice_name || null,
+        public_owner_id: public_owner_id || null,
       };
 
       if (field_mode === "classic") {

@@ -221,7 +221,18 @@ export const createAgent = async (req, res) => {
           .json({ success: false, error: "Agent template not found" });
       }
 
+      // Document Collection channel reflects whether this specific template
+      // actually supports it — same capabilities array the template picker
+      // in CreateAgent.jsx checks to decide whether to show the "Docs" badge.
+      const templateConfig =
+        typeof template.config === "string"
+          ? JSON.parse(template.config)
+          : template.config;
+      const classicHasDocCollection =
+        templateConfig?.capabilities?.includes("document_collection") || false;
+
       const baseAgentId = process.env.ELEVENLABS_AGENT_ID;
+
       if (!baseAgentId) {
         return res.status(500).json({
           success: false,
@@ -266,7 +277,11 @@ export const createAgent = async (req, res) => {
         payload: agentConfig,
       });
 
-      // Save to DB — KB stored here only, no ElevenLabs config changes
+      // Document Collection channel is on if any field actually needs a file/ticket
+      const hasDocumentFields = smart_fields.some(
+        (f) => f.field_type === "document" || f.field_type === "travel_ticket",
+      );
+
       const { data: agent, error: agentError } = await supabase
         .from("agents")
         .insert({
@@ -279,19 +294,20 @@ export const createAgent = async (req, res) => {
           status: "unassigned",
           event_title,
           field_mode: "classic",
+          document_collection_enabled: classicHasDocCollection, // ← new
           voice_id: resolvedVoiceId,
           voice_name: voice_name || null,
         })
-        .select(
-          `*, agent_templates (name, slug, icon_url, config), knowledge_bases (id, name)`,
-        )
+        .select(`*, knowledge_bases (id, name)`)
         .single();
 
       if (agentError) throw agentError;
 
-      return res
-        .status(201)
-        .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
+      return res.status(201).json({
+        success: true,
+        data: agent,
+        voice_import_warning: voiceImportWarning,
+      });
     }
 
     // ─── SMART FIELDS MODE ───────────────────────────────────────────────────
@@ -353,14 +369,18 @@ export const createAgent = async (req, res) => {
 
     if (agentError) throw agentError;
 
-    return res
-      .status(201)
-      .json({ success: true, data: agent, voice_import_warning: voiceImportWarning });
+    return res.status(201).json({
+      success: true,
+      data: agent,
+      voice_import_warning: voiceImportWarning,
+    });
   } catch (error) {
     const elevenLabsDetail = error.response?.data;
     console.error(
       "Error creating agent:",
-      elevenLabsDetail ? JSON.stringify(elevenLabsDetail, null, 2) : error.message,
+      elevenLabsDetail
+        ? JSON.stringify(elevenLabsDetail, null, 2)
+        : error.message,
     );
     res.status(500).json({
       success: false,
@@ -526,7 +546,13 @@ export const updateAgentDetails = async (req, res) => {
 
     // smart_fields-only columns — no-op for classic agents
     if (agent.field_mode === "smart_fields") {
-      if (smart_fields !== undefined) updatePayload.smart_fields = smart_fields;
+      if (smart_fields !== undefined) {
+        updatePayload.smart_fields = smart_fields;
+        updatePayload.document_collection_enabled = smart_fields.some(
+          (f) =>
+            f.field_type === "document" || f.field_type === "travel_ticket",
+        );
+      }
       if (first_message !== undefined)
         updatePayload.first_message = first_message;
     }
@@ -557,7 +583,9 @@ export const updateAgentDetails = async (req, res) => {
     const elevenLabsDetail = error.response?.data;
     console.error(
       "Error updating agent:",
-      elevenLabsDetail ? JSON.stringify(elevenLabsDetail, null, 2) : error.message,
+      elevenLabsDetail
+        ? JSON.stringify(elevenLabsDetail, null, 2)
+        : error.message,
     );
     res.status(500).json({
       success: false,

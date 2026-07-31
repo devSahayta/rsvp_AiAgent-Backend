@@ -199,10 +199,38 @@ const ASSISTANT_TOOLS = [
   {
     name: "get_knowledge_bases",
     description:
-      "Fetch the user's existing knowledge bases so they can reuse one instead of creating new. Use during the knowledge base step of agent creation.",
+      "Fetch the user's existing knowledge bases so they can reuse one instead of creating new. Use during the knowledge base step of agent creation. Always pass the field_mode chosen earlier in this flow (classic or smart_fields) so only compatible knowledge bases are shown.",
     input_schema: {
       type: "object",
-      properties: {},
+      properties: {
+        field_mode: {
+          type: "string",
+          enum: ["classic", "smart_fields"],
+          description:
+            "The agent mode chosen in Step 1 of this creation flow. Classic mode requires knowledge bases registered with ElevenLabs — smart_fields mode doesn't.",
+        },
+      },
+      required: ["field_mode"],
+    },
+  },
+  {
+    name: "get_voice_options",
+    description:
+      "Fetch a list of available Indian voices for the agent, with audio previews the user can listen to before choosing. Use during the voice selection step of agent creation, after the knowledge base step. Only call this if the user wants to browse/pick a specific voice — if they say 'skip' or 'use default', don't call this at all. Can be called again with different filters if the user wants to see more/different options.",
+    input_schema: {
+      type: "object",
+      properties: {
+        gender: {
+          type: "string",
+          enum: ["male", "female"],
+          description: "Optional filter by voice gender",
+        },
+        search: {
+          type: "string",
+          description:
+            "Optional search term if the user names a voice or describes a style directly (e.g. 'deep male voice', 'Neha')",
+        },
+      },
       required: [],
     },
   },
@@ -263,8 +291,16 @@ const ASSISTANT_TOOLS = [
               },
               field_type: {
                 type: "string",
-                enum: ["yes_no", "number", "text", "choice"],
-                description: "Type of the field",
+                enum: [
+                  "yes_no",
+                  "number",
+                  "text",
+                  "choice",
+                  "document",
+                  "travel_ticket",
+                ],
+                description:
+                  "Type of the field. document = collect a file via WhatsApp (e.g. ID proof), skipped on voice calls. travel_ticket = agent automatically asks for arrival and return tickets via WhatsApp with auto-extraction, skipped on voice calls.",
               },
               ai_question: {
                 type: "string",
@@ -285,6 +321,21 @@ const ASSISTANT_TOOLS = [
               },
             },
           },
+        },
+        voice_id: {
+          type: "string",
+          description:
+            "ElevenLabs voice_id of the voice the user selected via get_voice_options. Omit entirely if the user skipped voice selection.",
+        },
+        voice_name: {
+          type: "string",
+          description:
+            "Display name of the selected voice (from get_voice_options results). Omit if voice was skipped.",
+        },
+        public_owner_id: {
+          type: "string",
+          description:
+            "public_owner_id of the selected shared voice (from get_voice_options results). Required alongside voice_id so the voice can be imported. Omit if voice was skipped.",
         },
       },
       required: ["agent_name", "field_mode", "kb_name", "kb_content"],

@@ -13,6 +13,30 @@ import { executeToolCall } from "../utils/toolExecutor.js";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// Anthropic occasionally returns a transient 5xx "api_error" (server-side
+// issue, not a malformed request) and explicitly sets x-should-retry:false
+// on these, meaning the SDK's own retry logic won't kick in. One manual
+// retry after a short delay resolves the vast majority of these without
+// surfacing an error to the user.
+async function createMessageWithRetry(params, maxRetries = 1) {
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await anthropic.messages.create(params);
+    } catch (err) {
+      lastErr = err;
+      const isTransientServerError =
+        err?.status >= 500 && err?.error?.error?.type === "api_error";
+      if (!isTransientServerError || attempt === maxRetries) throw err;
+      console.warn(
+        `[assistant] Anthropic API transient error, retrying (attempt ${attempt + 1}/${maxRetries})...`,
+      );
+      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
+    }
+  }
+  throw lastErr;
+}
+
 // ── Build system prompt with live user context ────────────────────────────────
 async function buildSystemPrompt(userId) {
   const [eventsRes, agentsRes, samvaadikRes] = await Promise.all([
@@ -85,7 +109,7 @@ Samvaadik (WhatsApp): ${samvaadikStatus}
 - Do not mention tool names or internal workings in your responses.
 
 ## Create Agent — Guided Conversational Flow
-When user wants to create an agent, call start_create_agent first, then guide them through these 5 steps one at a time. Collect all info before calling finalize_create_agent.
+When user wants to create an agent, call start_create_agent first, then guide them through these 6 steps one at a time. Collect all info before calling finalize_create_agent.
 
 STEP 1 — AGENT MODE:
 Ask: "Which mode would you like? **Classic** (uses a predefined template — good for weddings, events) or **Smart Fields** (you define exactly what questions the agent asks — fully custom)?"
@@ -104,24 +128,36 @@ Ask: "What's the event title for this agent? (e.g. 'Beach Wedding 2026')"
 Then ask: "What's the opening message the agent should send?" (optional, give a default if they skip)
 Then guide them to define smart fields one by one. For EACH field ask:
   1. Field label (e.g. "RSVP Status", "Guest Count")
-  2. Field type — present as a numbered list: 1. yes_no  2. number  3. text  4. choice
-  3. The AI question the agent should ask (e.g. "Will you be attending?")
+  2. Field type — present as a numbered list: 1. yes_no  2. number  3. text  4. choice  5. document (collect a file via WhatsApp, e.g. ID proof)  6. travel_ticket (agent automatically asks for arrival and return tickets via WhatsApp with auto-extraction)
+     If they pick document or travel_ticket, mention this note: "Heads up — this only works over WhatsApp and will be automatically skipped on voice calls."
+  3. The AI question the agent should ask (e.g. "Will you be attending?" or for document: "Please share your ID proof" or for travel_ticket: "Please share your travel ticket")
   4. Is this field required? (yes → is_required: true, no → is_required: false)
   5. ONLY if type is choice: "What are the options?" (comma-separated)
 After each field ask "Add another field? (yes/no)" until they say no.
 IMPORTANT field rules:
   - field_key: auto-generate from label — lowercase, replace spaces with underscores, strip special chars. "RSVP Status" → "rsvp_status". "Guest Count" → "guest_count". NEVER ask the user for this.
   - is_required: MUST be boolean true or false — NOT a string. Map "yes" → true, "no" → false.
-  - options: ONLY include for choice type. For yes_no/number/text set options to [].
-  - ai_question: should be a natural, conversational question ending with "?"
+  - options: ONLY include for choice type. For yes_no/number/text/document/travel_ticket set options to [].
+  - ai_question: should be a natural, conversational question ending with "?" (except document/travel_ticket, which can be an instruction like "Please share your ID proof.")
   - Keep field_label exactly as the user typed it (preserve casing).
 
 STEP 4 — KNOWLEDGE BASE:
-Call get_knowledge_bases first. If they have existing ones, show them and ask "Would you like to reuse an existing knowledge base or create a new one?"
+Call get_knowledge_bases with field_mode set to whichever mode was chosen in Step 1. If they have existing compatible ones, show them and ask "Would you like to reuse an existing knowledge base or create a new one?"
 If creating new: Ask for KB name and content/details (event info, venue, FAQs etc.)
 If reusing: use the selected kb_id.
 
-STEP 5 — SUMMARY & CONFIRM:
+STEP 5 — VOICE (optional):
+Ask: "Would you like to pick a specific voice for this agent, or use the default voice?"
+If they want to browse, call get_voice_options. IMPORTANT — map their answer to the correct parameter:
+  - If they say a plain gender word ("female", "male", "woman", "man") → set the gender parameter to "female" or "male". Do NOT put this in search.
+  - Only use search for something beyond gender — a style/mood word ("deep", "calm", "energetic") or an actual voice name they mention ("something like Neha"). If they gave both a gender and a style (e.g. "female and friendly"), set gender to the gender word and search to just the style word, not the whole phrase.
+  - This distinction matters: gender alone routes to the same Indian-voice-only endpoint the manual voice picker uses, guaranteeing identical results. Adding unnecessary text to search changes which voices come back and can return different results than the manual page.
+This tool does not return the actual voice list to you — it only signals the UI to fetch and display voices matching those filters, with play buttons and audio previews, and a "Load more" option if they want to see additional voices beyond the first batch. Your text reply should be ONE short line only, e.g. "Here are a few options — give them a listen and pick one below." Never invent or describe voice names yourself since you don't have that list.
+The user will play previews and tap Select on a card, or ask for different options (call get_voice_options again with new filters if they want something different).
+When a voice is selected via the card, their next message will arrive in this exact machine-readable format: Use the voice "NAME" (voice_id: ID, public_owner_id: OWNER_ID) — extract voice_name, voice_id, and public_owner_id directly from that message. Do not guess or invent these values; only use them when they appear in this exact format. If the user instead describes a voice in plain language without this format, ask them to select it from the card rather than typing it.
+If they skip voice selection entirely, don't call get_voice_options — leave voice_id/voice_name/public_owner_id unset. The agent will use the default voice.
+
+STEP 6 — SUMMARY & CONFIRM:
 Show a complete summary in this exact format:
 
 ---
@@ -136,12 +172,14 @@ Show a complete summary in this exact format:
 [display_order+1]. **[field_label]** ([field_type]) — [is_required ? "Required" : "Optional"]
    Question: "[ai_question]"
    [If choice: Options: option1, option2, ...]
+   [If document or travel_ticket: Note: WhatsApp only — skipped on voice calls]
 
 **Knowledge Base:** [kb_name]
+**Voice:** [voice_name or "Default"]
 ---
 
 Say: "Does everything look correct? Shall I create this agent?"
-Only call finalize_create_agent AFTER the user explicitly says yes/confirm/create/go ahead/looks good.
+Only call finalize_create_agent AFTER the user explicitly says yes/confirm/create/go ahead/looks good. When calling it, include voice_id, voice_name, and public_owner_id if a voice was selected in Step 5 — otherwise omit them entirely.
 If they want to change anything — ask what to change, update the collected data, show summary again.
 After successful creation, say "Your agent is ready!" and the agent_created card will appear.
 
@@ -275,7 +313,7 @@ export async function handleAssistantChat(req, res) {
     // ── Round 1: Send to Claude ───────────────────────────────────────────────
     let pendingAction = null; // set if a tool returns action_type (e.g. redirect)
     let pendingConnectionData = null; // set if samvaadik is connected — sends summary to frontend
-    let response = await anthropic.messages.create({
+    let response = await createMessageWithRetry({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
       system: systemPrompt,
@@ -350,6 +388,16 @@ export async function handleAssistantChat(req, res) {
           };
         }
 
+        // Voice filters gathered — frontend fetches /api/voices itself
+        // (same endpoint + same Indian-voice filtering as the manual
+        // CreateAgent page) and renders the cards with live previews.
+        if (result.action_type === "voice_selection") {
+          pendingAction = {
+            type: "voice_selection",
+            filters: result.filters,
+          };
+        }
+
         // Media template — frontend must PUT the file to signed_url, then
         // call POST /api/samvaadik/templates/complete-media-upload with
         // storage_path + the template fields below to finish submission.
@@ -398,7 +446,7 @@ export async function handleAssistantChat(req, res) {
       messages.push({ role: "assistant", content: response.content });
       messages.push({ role: "user", content: toolResults });
 
-      response = await anthropic.messages.create({
+      response = await createMessageWithRetry({
         model: "claude-sonnet-4-6",
         max_tokens: 1024,
         system: systemPrompt,
@@ -417,18 +465,20 @@ export async function handleAssistantChat(req, res) {
     // Build updated history for next turn
     const updatedHistory = [...messages, { role: "assistant", content: reply }];
 
-    return res
-      .status(200)
-      .json({
-        reply,
-        updatedHistory,
-        action: pendingAction,
-        connectionData: pendingConnectionData || null,
-      });
+    return res.status(200).json({
+      reply,
+      updatedHistory,
+      action: pendingAction,
+      connectionData: pendingConnectionData || null,
+    });
   } catch (err) {
     console.error("[assistantController] Error:", err);
+    const isAnthropicOutage =
+      err?.status >= 500 && err?.error?.error?.type === "api_error";
     return res.status(500).json({
-      error: "Assistant ran into an error. Please try again.",
+      error: isAnthropicOutage
+        ? "Claude is experiencing elevated errors right now — this is on Anthropic's end, not Sutrak. Please try again in a moment (status.claude.com has live updates)."
+        : "Assistant ran into an error. Please try again.",
       ...(process.env.NODE_ENV === "development" && { details: err.message }),
     });
   }

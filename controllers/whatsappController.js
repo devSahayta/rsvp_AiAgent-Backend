@@ -1847,7 +1847,6 @@ export async function sendSamvaadikTemplateToParticipants(
     );
   }
 
-  // ── NEW: if caller didn't supply the real template body, fetch it ──────────
   if (!templateBodyText) {
     try {
       const { getTemplates } = await import("../utils/samvaadikClient.js");
@@ -1855,15 +1854,19 @@ export async function sendSamvaadikTemplateToParticipants(
       const matchedTemplate = templatesResp?.data?.find(
         (t) => t.name === templateName || t.template_name === templateName,
       );
-      templateBodyText =
-        matchedTemplate?.body_text ||
-        matchedTemplate?.components?.find((c) => c.type === "BODY")?.text ||
-        null;
-      console.log(
-        templateBodyText
-          ? "✅ Fetched real template body for message logging"
-          : "⚠️ Could not find matching template body, will fall back to placeholder",
-      );
+
+      if (matchedTemplate?.wt_id) {
+        const axiosLib = (await import("axios")).default;
+        const detailResp = await axiosLib.get(
+          `${process.env.SAMVAADIK_BASE_URL}/templates/${matchedTemplate.wt_id}`,
+          { headers: { "X-API-Key": conn.api_key } },
+        );
+        console.log(
+          "🔍 RAW template DETAIL:",
+          JSON.stringify(detailResp.data, null, 2),
+        );
+        // once we see the shape, extract body text here
+      }
     } catch (fetchErr) {
       console.error("⚠️ Failed to fetch template body:", fetchErr.message);
     }

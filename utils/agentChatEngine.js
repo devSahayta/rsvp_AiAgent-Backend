@@ -101,6 +101,11 @@ export const agentChatEngine = async ({
   event,
 }) => {
   try {
+    // ✅ Accumulates the Claude call this turn makes (0 or 1 entries — only
+    // the standard-field branch below calls Claude; document/travel_ticket
+    // fields are handled deterministically and never touch it).
+    const claudeUsage = [];
+
     // ── 1. Load session ────────────────────────────────────────────────────
     const session = await lookupSessionByPhone(phoneNumber);
 
@@ -123,7 +128,11 @@ export const agentChatEngine = async ({
         "[agentChatEngine] No smart fields found for event:",
         eventId,
       );
-      return "Sorry, I'm having trouble loading your RSVP questions. Please try again shortly.";
+      return {
+        reply:
+          "Sorry, I'm having trouble loading your RSVP questions. Please try again shortly.",
+        usage: claudeUsage,
+      };
     }
 
     let { current_index, collected_answers, conversation_history } = session;
@@ -143,7 +152,6 @@ export const agentChatEngine = async ({
       current_index++;
     }
 
-    // ── 4. Check if all fields done ────────────────────────────────────────
     if (current_index >= smartFields.length) {
       await closeSession(
         session.session_id,
@@ -152,7 +160,10 @@ export const agentChatEngine = async ({
         collected_answers,
       );
       const eventName = event?.event_name || "the event";
-      return `Thank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you! If you have any questions, feel free to reach out.`;
+      return {
+        reply: `Thank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you! If you have any questions, feel free to reach out.`,
+        usage: claudeUsage,
+      };
     }
 
     const currentField = smartFields[current_index];
@@ -164,7 +175,6 @@ export const agentChatEngine = async ({
       `[agentChatEngine] Turn: participant=${participantId} field="${currentField.field_key}" (${currentField.field_type}) index=${current_index}/${smartFields.length}`,
     );
 
-    // ── 5. Document / travel_ticket fields skip Claude entirely ────────────
     if (DOCUMENT_FIELD_TYPES.has(currentField.field_type)) {
       const result = await handleDocumentField({
         field: currentField,
@@ -177,6 +187,11 @@ export const agentChatEngine = async ({
         guestName,
       });
 
+      // Real OCR/extraction cost (0 for generic `document` fields — they
+      // never call autoExtractFromImage; only travel_ticket does).
+      const ocrVisionUnits = result.ocrVisionUnits || 0;
+      const ocrClaudeUsage = result.ocrClaudeUsage || [];
+
       const historyWithReply = [
         ...conversation_history,
         { role: "user", content: userMessage || "[media]" },
@@ -188,7 +203,12 @@ export const agentChatEngine = async ({
         // persist field_state, keep index the same.
         await updateFieldState(session.session_id, result.newFieldState);
         await updateHistory(session.session_id, historyWithReply);
-        return result.reply;
+        return {
+          reply: result.reply,
+          usage: claudeUsage,
+          ocrVisionUnits,
+          ocrClaudeUsage,
+        };
       }
 
       // ── Field fully collected — advance index, clear field_state ─────────
@@ -221,7 +241,12 @@ export const agentChatEngine = async ({
           updatedAnswers,
         );
         const eventName = event?.event_name || "the event";
-        return `${result.reply}\n\nThank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you!`;
+        return {
+          reply: `${result.reply}\n\nThank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you!`,
+          usage: claudeUsage,
+          ocrVisionUnits,
+          ocrClaudeUsage,
+        };
       }
 
       // NEW — since this turn never went through Claude, nothing has asked
@@ -229,7 +254,12 @@ export const agentChatEngine = async ({
       // the "move on smoothly" instruction in buildSystemPrompt; this
       // deterministic branch has to do it explicitly instead).
       const nextField = smartFields[nextIndex];
-      return `${result.reply}\n\n${buildFieldPrompt(nextField)}`;
+      return {
+        reply: `${result.reply}\n\n${buildFieldPrompt(nextField)}`,
+        usage: claudeUsage,
+        ocrVisionUnits,
+        ocrClaudeUsage,
+      };
     }
 
     // ── 6. Standard fields (yes_no/number/text/choice) — existing Claude flow ──
@@ -265,6 +295,16 @@ export const agentChatEngine = async ({
         },
       },
     );
+
+    const usageData = claudeResponse.data?.usage;
+    const modelUsed = claudeResponse.data?.model;
+    if (usageData) {
+      claudeUsage.push({
+        model: modelUsed,
+        input_tokens: usageData.input_tokens,
+        output_tokens: usageData.output_tokens,
+      });
+    }
 
     const rawReply = claudeResponse.data?.content?.[0]?.text || "";
     console.log(
@@ -316,7 +356,7 @@ export const agentChatEngine = async ({
         );
         const eventName = event?.event_name || "the event";
         const completionMsg = `${reply}\n\nThank you ${guestName}! 🎉 Your RSVP for *${eventName}* is complete. We look forward to seeing you!`;
-        return completionMsg;
+        return { reply: completionMsg, usage: claudeUsage };
       }
 
       // NEW — if we just advanced INTO a document/travel_ticket field from
@@ -324,7 +364,10 @@ export const agentChatEngine = async ({
       // prompt) won't have asked for the document — append that prompt now.
       const nextField = smartFields[nextIndex];
       if (isCurrentField && DOCUMENT_FIELD_TYPES.has(nextField.field_type)) {
-        return `${reply}\n\n${buildFieldPrompt(nextField)}`;
+        return {
+          reply: `${reply}\n\n${buildFieldPrompt(nextField)}`,
+          usage: claudeUsage,
+        };
       }
     } else {
       console.log(
@@ -333,12 +376,15 @@ export const agentChatEngine = async ({
       await updateHistory(session.session_id, historyWithReply);
     }
 
-    return reply;
+    return { reply, usage: claudeUsage };
   } catch (err) {
     console.error(
       "[agentChatEngine] Error:",
       err.response?.data || err.message,
     );
-    return `Sorry ${guestName}, I'm having a technical issue right now. Please try again in a moment.`;
+    return {
+      reply: `Sorry ${guestName}, I'm having a technical issue right now. Please try again in a moment.`,
+      usage: [], // claudeUsage is out of scope here — same edge case as generalChatEngine.js
+    };
   }
 };

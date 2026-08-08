@@ -5,8 +5,6 @@
 import cron from "node-cron";
 import axios from "axios";
 import { supabase } from "../config/supabase.js";
-import { calculateVoiceCredits } from "../config/creditPricing.js";
-import { getUserById, updateUserCredits } from "../models/userModel.js";
 import { syncBatchStatusesForEvent } from "../controllers/eventController.js";
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
@@ -72,106 +70,27 @@ const syncProductionBatch = async (event) => {
       );
     }
 
-    // ── 3. Fetch conversation durations for all recipients ────────────────────
-    let totalDurationSeconds = 0;
-    let successfulCalls = 0;
-
-    for (const recipient of batch.recipients) {
-      if (recipient.status === "completed" && recipient.conversation_id) {
-        try {
-          const convoRes = await axios.get(
-            `https://api.elevenlabs.io/v1/convai/conversations/${recipient.conversation_id}`,
-            { headers: { "xi-api-key": ELEVENLABS_API_KEY } },
-          );
-
-          const duration = convoRes.data.metadata?.call_duration_secs || 0;
-          totalDurationSeconds += duration;
-          successfulCalls++;
-
-          console.log(
-            `[PROD-CRON] 📞 Call ${recipient.conversation_id}: ${duration}s`,
-          );
-        } catch (err) {
-          console.warn(
-            `[PROD-CRON] ⚠️  Could not fetch conversation ${recipient.conversation_id}`,
-          );
-        }
-      }
-    }
-
-    console.log(
-      `[PROD-CRON] 📊 Total duration: ${totalDurationSeconds}s across ${successfulCalls} calls`,
-    );
-
-    if (totalDurationSeconds === 0) {
-      console.log(
-        `[PROD-CRON] ℹ️  No successful calls, skipping credit deduction`,
-      );
-      await supabase
-        .from("events")
-        .update({ batch_status: "completed" })
-        .eq("event_id", event_id);
-      return null;
-    }
-
-    // ── 4. Check if credits already deducted ───────────────────────────────────
-    const { data: eventData } = await supabase
-      .from("events")
-      .select("credits_deducted")
-      .eq("event_id", event_id)
-      .single();
-
-    if (eventData?.credits_deducted) {
-      console.log(
-        `[PROD-CRON] ℹ️  Credits already deducted for event ${event_id}, skipping`,
-      );
-      return null;
-    }
-
-    // ── 5. Deduct credits ───────────────────────────────────────────────────
-    if (!user_id) {
-      console.warn(
-        `[PROD-CRON] ⚠️  No user_id for event ${event_id}, cannot deduct credits`,
-      );
-      return null;
-    }
-
-    const user = await getUserById(user_id);
-    if (!user) {
-      console.warn(`[PROD-CRON] ⚠️  User ${user_id} not found`);
-      return null;
-    }
-
-    const creditsToDeduct = calculateVoiceCredits(totalDurationSeconds, false); // false = production
-    const newCredits = Number((user.credits - creditsToDeduct).toFixed(2));
-
-    if (user.credits < creditsToDeduct) {
-      console.warn(
-        `[PROD-CRON] ⚠️  User ${user_id} has insufficient credits. Deducting to 0.`,
-      );
-      await updateUserCredits(user_id, 0);
-    } else {
-      await updateUserCredits(user_id, newCredits);
-    }
-
-    // ── 6. Mark credits as deducted in event ────────────────────────────────
+    // ── 3. Mark this batch as processed ────────────────────────────────────
+    // Real per-conversation billing already happened above, inside
+    // syncBatchStatusesForEvent -> settleConversationCost. This cron's only
+    // remaining job is detecting "batch fully done" and not re-processing
+    // it forever. `credits_deducted` is kept as a boolean-style "done" flag
+    // (not a real credit amount) purely so the pending-events query below
+    // still excludes it correctly — the real numbers live in
+    // conversation_cost, queryable per-conversation or summed by event_id.
     await supabase
       .from("events")
       .update({
         batch_status: "completed",
-        credits_deducted: creditsToDeduct,
-        total_call_duration: totalDurationSeconds,
-        successful_calls: successfulCalls,
+        credits_deducted: true,
       })
       .eq("event_id", event_id);
 
     console.log(
-      `[PROD-CRON] ✅ Credits deducted for event ${event_id}: ` +
-        `${user.credits} → ${Math.max(newCredits, 0)} (-${creditsToDeduct}) | ` +
-        `duration: ${totalDurationSeconds}s across ${successfulCalls} calls`,
+      `[PROD-CRON] ✅ Batch fully processed for event ${event_id} — billing already settled per-conversation above.`,
     );
 
-    return creditsToDeduct;
+    return null;
   } catch (err) {
     console.error(
       `[PROD-CRON] ❌ Error syncing batch ${batch_id}:`,

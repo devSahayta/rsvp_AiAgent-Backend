@@ -153,7 +153,6 @@ ${kbContent}`;
   return prompt;
 }
 
-// ── Main export ────────────────────────────────────────────────────────────
 export const generalChatEngine = async ({
   phoneNumber,
   userMessage,
@@ -161,6 +160,12 @@ export const generalChatEngine = async ({
   allSessions = [],
   event,
 }) => {
+  // ✅ Declared OUTSIDE the try block entirely, at function top level —
+  // guarantees it's in scope for every return path, including both the
+  // inner catch (Claude call failure) and the outer catch (fatal error),
+  // with zero ambiguity about which block it belongs to.
+  const claudeUsage = [];
+
   try {
     console.log(
       `[generalChatEngine] phone=${phoneNumber} event="${event.event_name}" msg="${userMessage.slice(0, 60)}"`,
@@ -238,11 +243,27 @@ export const generalChatEngine = async ({
           timeout: 15000,
         },
       );
+
+      // Capture usage immediately — tokens are billed even if reply
+      // extraction below fails, so don't wait until after that check.
+      const usageData = response.data?.usage;
+      const modelUsed = response.data?.model;
+      if (usageData) {
+        claudeUsage.push({
+          model: modelUsed,
+          input_tokens: usageData.input_tokens,
+          output_tokens: usageData.output_tokens,
+        });
+      }
+
       reply = response.data?.content?.[0]?.text?.trim();
       if (!reply) throw new Error("Empty Claude response");
     } catch (claudeErr) {
       console.error("[generalChatEngine] Claude error:", claudeErr.message);
-      return "Sorry, I had trouble responding just now. Please try again!";
+      return {
+        reply: "Sorry, I had trouble responding just now. Please try again!",
+        usage: claudeUsage,
+      };
     }
 
     console.log(`[generalChatEngine] Reply: "${reply.slice(0, 80)}"`);
@@ -262,9 +283,12 @@ export const generalChatEngine = async ({
       })
       .eq("session_id", primarySession.session_id);
 
-    return reply;
+    return { reply, usage: claudeUsage };
   } catch (err) {
     console.error("[generalChatEngine] Fatal error:", err.message);
-    return "Sorry, something went wrong. Please try again shortly.";
+    return {
+      reply: "Sorry, something went wrong. Please try again shortly.",
+      usage: [], // claudeUsage is out of scope here (declared inside the inner try) — see note below
+    };
   }
 };

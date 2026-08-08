@@ -53,6 +53,12 @@ export default async function decideNextStep(context = {}, options = {}) {
 
   let normalizedMessage = userMessage?.trim()?.toLowerCase();
 
+  // ✅ Accumulates every sendToClaude call made during this invocation —
+  // this function can call Claude up to 3 times (dress-code path, general
+  // wedding-info path, main flow), same as assistantController.js's
+  // tool-use loop needed summing across multiple rounds.
+  const claudeUsage = [];
+
   // ===== WEDDING INFO OVERRIDE (ABSOLUTE PRIORITY) =====
   const needsWeddingInfo =
     /venue|location|place|address|where|map|direction/.test(
@@ -118,7 +124,11 @@ export default async function decideNextStep(context = {}, options = {}) {
     Return ONLY valid JSON (no markdown, no code blocks):
     {"reply": "Here are the dress codes! 👗✨\\n\\n- Event: Dress Code\\n- Event: Dress Code", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
 
-          const { text: raw } = await sendToClaude(
+          const {
+            text: raw,
+            usage,
+            model,
+          } = await sendToClaude(
             "Dress Code Assistant",
             [{ role: "user", content: aiPrompt }],
             {
@@ -126,6 +136,11 @@ export default async function decideNextStep(context = {}, options = {}) {
               // temperature: 0,
             },
           );
+          claudeUsage.push({
+            model,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+          });
 
           console.log("🤖 AI raw response:", raw?.substring(0, 200));
 
@@ -149,7 +164,7 @@ export default async function decideNextStep(context = {}, options = {}) {
           }
 
           console.log("✅ Dress code AI response parsed successfully");
-          return parsed;
+          return { ...parsed, usage: claudeUsage };
         } catch (err) {
           console.error("❌ Dress code AI error:", err.message);
           console.log("⚠️  Falling back to simple dress code extraction");
@@ -167,6 +182,7 @@ export default async function decideNextStep(context = {}, options = {}) {
               reply: dressCodeResponse,
               nextState: callStatus,
               actions: { updateDB: false, fields: {} },
+              usage: claudeUsage,
             };
           }
 
@@ -203,7 +219,11 @@ export default async function decideNextStep(context = {}, options = {}) {
     Return ONLY valid JSON (no markdown, no code blocks):
     {"reply": "your focused answer here", "nextState": "${callStatus}", "actions": {"updateDB": false, "fields": {}}}`;
 
-        const { text: raw } = await sendToClaude(
+        const {
+          text: raw,
+          usage,
+          model,
+        } = await sendToClaude(
           "Wedding Info Assistant",
           [{ role: "user", content: aiPrompt }],
           {
@@ -212,6 +232,11 @@ export default async function decideNextStep(context = {}, options = {}) {
             max_tokens: 300, // Keep responses concise
           },
         );
+        claudeUsage.push({
+          model,
+          input_tokens: usage.input_tokens,
+          output_tokens: usage.output_tokens,
+        });
 
         console.log(
           "🤖 AI raw response (first 200 chars):",
@@ -249,16 +274,15 @@ export default async function decideNextStep(context = {}, options = {}) {
           throw new Error("AI response missing required fields");
         }
 
-        return parsed;
+        return { ...parsed, usage: claudeUsage };
       } catch (err) {
-        console.error("❌ AI answer generation error:", err.message);
-        console.log("⚠️  Falling back to full KB content");
-
-        // Fallback to full KB content
+        console.error("❌ AI ERROR in decideNextStep:", err?.message || err);
         return {
-          reply: weddingInfo,
+          reply:
+            "Sorry — I'm having trouble processing that. Could you repeat?",
           nextState: callStatus,
           actions: { updateDB: false, fields: {} },
+          usage: claudeUsage, // whatever succeeded before the failure, if anything
         };
       }
     } else {
@@ -566,7 +590,11 @@ If a user indicates — in ANY phrasing, not just exact keywords — that they d
 
   try {
     // ===== API CALL =====
-    const { text: raw } = await sendToClaude(
+    const {
+      text: raw,
+      usage,
+      model,
+    } = await sendToClaude(
       systemPrompt,
       [{ role: "user", content: userPrompt }],
       {
@@ -574,6 +602,11 @@ If a user indicates — in ANY phrasing, not just exact keywords — that they d
         max_tokens: 2048,
       },
     );
+    claudeUsage.push({
+      model,
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+    });
 
     const cleaned = (raw || "").trim();
     console.log("🔎 RAW CLAUDE RESPONSE:", cleaned);
@@ -661,13 +694,19 @@ If a user indicates — in ANY phrasing, not just exact keywords — that they d
       console.log("✅ TEST MODE - Response ready (no DB writes)");
     }
 
-    return parsed;
+    return { ...parsed, usage: claudeUsage };
   } catch (err) {
-    console.error("❌ AI ERROR in decideNextStep:", err?.message || err);
+    console.error("❌ AI answer generation error:", err.message);
+    console.log("⚠️  Falling back to full KB content");
+
+    // Fallback to full KB content — claudeUsage may still hold a cost
+    // if sendToClaude succeeded but something after it (e.g. JSON
+    // parsing) failed; keep it so that cost isn't silently dropped.
     return {
-      reply: "Sorry — I'm having trouble processing that. Could you repeat?",
+      reply: weddingInfo,
       nextState: callStatus,
       actions: { updateDB: false, fields: {} },
+      usage: claudeUsage,
     };
   }
 }

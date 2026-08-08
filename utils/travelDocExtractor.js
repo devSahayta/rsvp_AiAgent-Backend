@@ -90,7 +90,10 @@ export async function extractTextFromDocument(fileUrl) {
       }
 
       console.log("✅ PDF text extraction completed");
-      return pdfResult.text.trim();
+      return {
+        text: pdfResult.text.trim(),
+        visionUnits: pdfResult.visionUnits ?? 1,
+      };
     }
 
     // ================
@@ -115,7 +118,9 @@ export async function extractTextFromDocument(fileUrl) {
     );
     console.log("📝 Raw text preview:", textAnnotation.substring(0, 200));
 
-    return textAnnotation.trim();
+    // One textDetection call was made above — that's 1 billable Vision unit,
+    // regardless of how much text came back.
+    return { text: textAnnotation.trim(), visionUnits: 1 };
   } catch (error) {
     console.error("❌ Cloud Vision API error:", error);
     throw new Error(`Text extraction failed: ${error.message}`);
@@ -199,8 +204,10 @@ Remember:
 
 Return ONLY the JSON object, nothing else.`;
 
+    const modelUsed =
+      process.env.CLAUDE_MODEL_EXTRACTION || "claude-haiku-4-5-20251001";
     const message = await anthropic.messages.create({
-      model: process.env.CLAUDE_MODEL_EXTRACTION || "claude-haiku-4-5-20251001",
+      model: modelUsed,
       max_tokens: 1024,
       temperature: 0,
       system: systemPrompt,
@@ -219,7 +226,14 @@ Return ONLY the JSON object, nothing else.`;
 
     console.log("✅ Claude parsing successful:", parsedData);
 
-    return parsedData;
+    return {
+      data: parsedData,
+      usage: {
+        model: modelUsed,
+        input_tokens: message.usage?.input_tokens || 0,
+        output_tokens: message.usage?.output_tokens || 0,
+      },
+    };
   } catch (error) {
     console.error("❌ Claude parsing error:", error);
     throw new Error(`Text parsing failed: ${error.message}`);
@@ -227,34 +241,53 @@ Return ONLY the JSON object, nothing else.`;
 }
 
 /**
- * Main function to extract and parse travel document
- * @param {string} documentUrl - URL/path to the document
- * @param {string} transportType - "Flight Ticket" | "Train Ticket" | "Bus Ticket"
- * @param {string} direction - "Arrival" | "Departure"
- * @returns {Promise<Object>} - Complete extraction result
+ * @param {string} documentUrl
+ * @param {string} transportType
+ * @param {string} direction
+ * @param {{ text: string, visionUnits: number } | null} preExtracted
+ *   Pass this if the caller already ran extractTextFromDocument on this
+ *   same URL (e.g. autoExtractFromImage's own Step 1) — skips a second,
+ *   fully redundant Vision API call on the identical file.
  */
-export async function extractTravelInfo(documentUrl, transportType, direction) {
+export async function extractTravelInfo(
+  documentUrl,
+  transportType,
+  direction,
+  preExtracted = null,
+) {
   try {
     console.log("\n🚀 Starting travel document extraction...");
     console.log("📄 Document:", documentUrl);
     console.log("🚗 Type:", transportType);
     console.log("➡️ Direction:", direction);
 
-    // Step 1: Extract raw text using Cloud Vision
-    const rawText = await extractTextFromDocument(documentUrl);
+    // Step 1: Reuse already-extracted text if the caller provided it,
+    // otherwise extract it now (still supports calling this function
+    // standalone, without going through autoExtractFromImage first).
+    let rawText, visionUnits;
+    if (preExtracted?.text) {
+      console.log(
+        "♻️  Reusing already-extracted text — skipping duplicate Vision call",
+      );
+      rawText = preExtracted.text;
+      visionUnits = 0; // already billed by the caller for this extraction
+    } else {
+      const extraction = await extractTextFromDocument(documentUrl);
+      rawText = extraction.text;
+      visionUnits = extraction.visionUnits;
+    }
 
     // Step 2: Parse text using Claude
-    const structuredData = await parseTextWithClaude(
-      rawText,
-      transportType,
-      direction,
-    );
+    const { data: structuredData, usage: claudeUsage } =
+      await parseTextWithClaude(rawText, transportType, direction);
 
     // Step 3: Combine results
     const result = {
       success: true,
       rawText: rawText,
       extractedData: structuredData,
+      visionUnits,
+      claudeUsage,
       metadata: {
         transportType: transportType,
         direction: direction,
@@ -271,6 +304,8 @@ export async function extractTravelInfo(documentUrl, transportType, direction) {
       error: error.message,
       rawText: null,
       extractedData: null,
+      visionUnits: 0,
+      claudeUsage: null,
       metadata: {
         transportType: transportType,
         direction: direction,

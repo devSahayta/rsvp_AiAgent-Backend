@@ -2,10 +2,10 @@
 import { config as dotenvConfig } from "dotenv";
 dotenvConfig();
 
-import { PDFDocument } from 'pdf-lib';
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import { createCanvas } from 'canvas';
-import vision from '@google-cloud/vision';
+import { PDFDocument } from "pdf-lib";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import { createCanvas } from "canvas";
+import vision from "@google-cloud/vision";
 
 // 🔧 FIXED: Initialize Vision Client with JSON credentials from env
 let visionClient;
@@ -17,30 +17,34 @@ try {
 
   // Parse the JSON credentials
   const googleCreds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-  
+
   // Fix private key newlines
   if (googleCreds.private_key) {
-    googleCreds.private_key = googleCreds.private_key.replace(/\\n/g, '\n');
+    googleCreds.private_key = googleCreds.private_key.replace(/\\n/g, "\n");
   }
-  
+
   // Validate required fields
-  const requiredFields = ['type', 'project_id', 'private_key', 'client_email'];
-  const missingFields = requiredFields.filter(field => !googleCreds[field]);
-  
+  const requiredFields = ["type", "project_id", "private_key", "client_email"];
+  const missingFields = requiredFields.filter((field) => !googleCreds[field]);
+
   if (missingFields.length > 0) {
-    throw new Error(`Missing required fields in GOOGLE_SERVICE_ACCOUNT: ${missingFields.join(', ')}`);
+    throw new Error(
+      `Missing required fields in GOOGLE_SERVICE_ACCOUNT: ${missingFields.join(", ")}`,
+    );
   }
 
   // Initialize Vision Client with credentials object
   visionClient = new vision.ImageAnnotatorClient({
-    credentials: googleCreds
+    credentials: googleCreds,
   });
-  
+
   console.log("✅ Google Vision API (PDF) initialized successfully");
   console.log(`📧 Using service account: ${googleCreds.client_email}`);
-  
 } catch (error) {
-  console.error("❌ Failed to initialize Google Vision API (PDF):", error.message);
+  console.error(
+    "❌ Failed to initialize Google Vision API (PDF):",
+    error.message,
+  );
   console.error("💡 Make sure GOOGLE_SERVICE_ACCOUNT is set correctly in .env");
   throw error;
 }
@@ -53,7 +57,7 @@ try {
 async function convertPdfToImage(pdfBuffer) {
   try {
     console.log("🔄 Converting PDF to image...");
-    
+
     // Check page count with pdf-lib
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     const pageCount = pdfDoc.getPageCount();
@@ -65,31 +69,30 @@ async function convertPdfToImage(pdfBuffer) {
 
     // Render with pdfjs-dist
     const loadingTask = pdfjsLib.getDocument({
-      data: new Uint8Array(pdfBuffer)
+      data: new Uint8Array(pdfBuffer),
     });
-    
+
     const pdfDocument = await loadingTask.promise;
     const page = await pdfDocument.getPage(1); // First page only
-    
+
     // High quality rendering
     const viewport = page.getViewport({ scale: 2.0 });
-    
+
     // Create canvas
     const canvas = createCanvas(viewport.width, viewport.height);
-    const context = canvas.getContext('2d');
-    
+    const context = canvas.getContext("2d");
+
     // Render PDF page to canvas
     await page.render({
       canvasContext: context,
-      viewport: viewport
+      viewport: viewport,
     }).promise;
-    
+
     // Convert to PNG buffer
-    const imageBuffer = canvas.toBuffer('image/png');
+    const imageBuffer = canvas.toBuffer("image/png");
     console.log(`✅ PDF converted to PNG (${imageBuffer.length} bytes)`);
-    
+
     return imageBuffer;
-    
   } catch (error) {
     console.error("❌ PDF to image conversion error:", error);
     throw error;
@@ -108,41 +111,48 @@ export async function extractTextFromPDF(pdfBuffer) {
 
     // Step 1: Convert PDF to image
     const imageBuffer = await convertPdfToImage(pdfBuffer);
-    
+
     // Step 2: Extract text using Vision API (same as image flow)
     console.log("🔍 Running Vision API on rendered image...");
-    
+
     const [result] = await visionClient.textDetection({
-      image: { content: imageBuffer }
+      image: { content: imageBuffer },
     });
 
     const detections = result.textAnnotations;
-    
+
     if (detections && detections.length > 0) {
       const extractedText = detections[0].description.trim();
-      console.log(`✅ Text extracted from PDF: ${extractedText.length} characters`);
+      console.log(
+        `✅ Text extracted from PDF: ${extractedText.length} characters`,
+      );
       return {
         success: true,
-        text: extractedText
+        text: extractedText,
+        visionUnits: 1, // one textDetection call was made, regardless of PDF page count
       };
     }
 
     console.warn("⚠️ No text found in converted PDF image");
     return {
       success: false,
-      text: '',
-      error: "No text detected in PDF"
+      text: "",
+      error: "No text detected in PDF",
+      visionUnits: 1, // the Vision call still happened and is still billable, even with no result
     };
-
   } catch (error) {
     console.error("❌ PDF extraction failed:", error);
     return {
       success: false,
-      text: '',
-      error: error.message
+      text: "",
+      error: error.message,
+      visionUnits: 0, // failed before/during Vision call — e.g. PDF render error — not billable
     };
   }
 }
+
+/**
+ * Extract text from PDF URL (download first, then extract)
 
 /**
  * Extract text from PDF URL (download first, then extract)
@@ -152,7 +162,7 @@ export async function extractTextFromPDF(pdfBuffer) {
 export async function extractTextFromPDFUrl(pdfUrl) {
   try {
     console.log("🌐 Downloading PDF from URL...");
-    
+
     const response = await fetch(pdfUrl);
     if (!response.ok) {
       throw new Error(`Failed to download PDF: ${response.status}`);
@@ -160,16 +170,17 @@ export async function extractTextFromPDFUrl(pdfUrl) {
 
     const arrayBuffer = await response.arrayBuffer();
     const pdfBuffer = Buffer.from(arrayBuffer);
-    
+
     console.log(`✅ PDF downloaded (${pdfBuffer.length} bytes)`);
-    
-    return await extractTextFromPDF(pdfBuffer);
+
+    return await extractTextFromPDF(pdfBuffer); // already includes visionUnits
   } catch (error) {
     console.error("❌ PDF URL extraction error:", error);
     return {
       success: false,
-      text: '',
-      error: error.message
+      text: "",
+      error: error.message,
+      visionUnits: 0, // never reached Vision — download failed
     };
   }
 }

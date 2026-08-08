@@ -56,6 +56,27 @@ export const elevenlabsApi = {
       throw error;
     }
   },
+
+  // Get full details for one conversation — includes real cost (cost_fiat in USD)
+  getConversationDetails: async (conversationId) => {
+    try {
+      const response = await axios.get(
+        `${BASE_URL}/conversations/${conversationId}`,
+        {
+          headers: {
+            "xi-api-key": ELEVENLABS_API_KEY,
+          },
+        },
+      );
+      return response.data;
+    } catch (error) {
+      console.error(
+        `❌ Error fetching conversation details for ${conversationId}:`,
+        error.response?.data || error.message,
+      );
+      throw error;
+    }
+  },
 };
 
 export const listElevenLabsKB = async () => {

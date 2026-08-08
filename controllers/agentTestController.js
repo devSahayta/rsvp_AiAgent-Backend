@@ -5,9 +5,16 @@ import { submitTestBatchCall } from "../utils/elevenlabsApi.js";
 import {
   CREDIT_PRICING,
   calculateChatCredits,
-  calculateVoiceCredits,
+  TEST_MIN_VOICE_CREDIT_HOLD_PER_CALL,
+  TEST_MIN_CHAT_CREDIT_HOLD,
+  formatCredits,
 } from "../config/creditPricing.js";
 import { getUserById, updateUserCredits } from "../models/userModel.js";
+import {
+  logVoiceUsage,
+  settleConversationCost,
+  settleChatFromUsage,
+} from "../models/creditLedgerModel.js";
 import {
   runClassicTestChat,
   runSmartFieldsTestChat,
@@ -43,14 +50,15 @@ export const testVoiceAgent = async (req, res) => {
         .json({ success: false, message: "User not found" });
     }
 
-    const estimatedCredits = CREDIT_PRICING.TEST_VOICE_PER_MINUTE;
-    if (user.credits < estimatedCredits) {
+    if (user.credits < TEST_MIN_VOICE_CREDIT_HOLD_PER_CALL) {
       return res.status(402).json({
         success: false,
         message: "Insufficient credits for test voice call",
-        current_balance: user.credits,
-        required_credits: estimatedCredits,
-        shortfall: estimatedCredits - user.credits,
+        current_balance: formatCredits(user.credits),
+        required_credits: formatCredits(TEST_MIN_VOICE_CREDIT_HOLD_PER_CALL),
+        shortfall: formatCredits(
+          TEST_MIN_VOICE_CREDIT_HOLD_PER_CALL - user.credits,
+        ),
       });
     }
 
@@ -339,9 +347,11 @@ export const syncVoiceTestStatus = async (req, res) => {
     else if (recipient.status === "pending" || recipient.status === "scheduled")
       mappedStatus = "queued";
 
-    // Fetch conversation transcript + duration
+    // Fetch conversation transcript + full metadata (includes cost_fiat,
+    // same field used for real production voice billing)
     let transcript = null;
     let duration = null;
+    let conversationMetadata = null;
 
     if (recipient.conversation_id) {
       try {
@@ -351,7 +361,8 @@ export const syncVoiceTestStatus = async (req, res) => {
         );
         const conversation = convoRes.data;
         transcript = conversation.transcript || null;
-        duration = conversation.metadata?.call_duration_secs || null;
+        conversationMetadata = conversation.metadata || null;
+        duration = conversationMetadata?.call_duration_secs || null;
         console.log(`⏱️ Call duration: ${duration} seconds`);
       } catch {
         console.warn("⚠️ Failed to fetch conversation details");
@@ -380,26 +391,39 @@ export const syncVoiceTestStatus = async (req, res) => {
         .json({ success: false, message: "Failed to update test session" });
     }
 
-    // Deduct credits if call completed
+    // Settle real cost (@ 50% test markup) if call completed and connected
     let creditsDeducted = null;
     if (
       mappedStatus === "completed" &&
       duration &&
       duration > 0 &&
-      data.user_id
+      data.user_id &&
+      conversationMetadata
     ) {
       try {
-        const creditsToDeduct = calculateVoiceCredits(duration, true);
-        const user = await getUserById(data.user_id);
+        const voiceCostUsd = await logVoiceUsage({
+          userId: data.user_id,
+          eventId: null, // test calls aren't tied to a real event
+          conversationId: recipient.conversation_id, // already unique per ElevenLabs call
+          metadata: conversationMetadata,
+        });
 
-        if (user && user.credits >= creditsToDeduct) {
-          const newCredits = Number(
-            (user.credits - creditsToDeduct).toFixed(2),
-          );
-          await updateUserCredits(data.user_id, newCredits);
-          creditsDeducted = creditsToDeduct;
+        const settlement = await settleConversationCost({
+          userId: data.user_id,
+          conversationId: recipient.conversation_id,
+          eventId: null,
+          conversationType: "voice",
+          feature: "test_voice_agent",
+          isTest: true, // 50% of production markup, per lead
+          chatbotCostUsd: 0, // ElevenLabs' own LLM cost is already inside voiceCostUsd
+          voiceCostUsd,
+          telephonyCostUsd: 0, // test calls likely don't route through Vobiz — adjust if they do
+        });
+
+        if (settlement && !settlement.alreadySettled) {
+          creditsDeducted = settlement.credits;
           console.log(
-            `✅ Credits deducted: ${user.credits} → ${newCredits} (-${creditsToDeduct})`,
+            `✅ Test voice settled: -${settlement.credits} credits | balance: ${settlement.newBalance}`,
           );
 
           await supabase
@@ -407,17 +431,14 @@ export const syncVoiceTestStatus = async (req, res) => {
             .update({
               test_data_collected: {
                 ...data.test_data_collected,
-                credits_deducted: creditsToDeduct,
-                previous_balance: user.credits,
-                new_balance: newCredits,
+                credits_deducted: settlement.credits,
+                new_balance: settlement.newBalance,
               },
             })
             .eq("test_session_id", data.test_session_id);
-        } else {
-          console.warn(`⚠️ Insufficient credits for user ${data.user_id}`);
         }
       } catch (creditError) {
-        console.error("❌ Error deducting credits:", creditError);
+        console.error("❌ Error settling test voice cost:", creditError);
       }
     }
 
@@ -471,18 +492,17 @@ export const testChatAgent = async (req, res) => {
       return res.status(404).json({ success: false, error: "User not found" });
     }
 
-    const requiredCredits = CREDIT_PRICING.TEST_CHAT_PER_MESSAGE;
-    if (user.credits < requiredCredits) {
+    if (user.credits < TEST_MIN_CHAT_CREDIT_HOLD) {
       return res.status(402).json({
         success: false,
         error: "Insufficient credits for test chat",
-        current_balance: user.credits,
-        required_credits: requiredCredits,
-        shortfall: requiredCredits - user.credits,
+        current_balance: formatCredits(user.credits),
+        required_credits: formatCredits(TEST_MIN_CHAT_CREDIT_HOLD),
+        shortfall: formatCredits(TEST_MIN_CHAT_CREDIT_HOLD - user.credits),
       });
     }
     console.log(
-      `✅ Credit check passed: ${user.credits} >= ${requiredCredits}`,
+      `✅ Credit check passed: ${user.credits} >= ${TEST_MIN_CHAT_CREDIT_HOLD}`,
     );
 
     // ── Fetch Agent ────────────────────────────────────────────────
@@ -513,6 +533,8 @@ export const testChatAgent = async (req, res) => {
 
     console.log(`🔄 Running ${fieldMode} test chat engine...`);
 
+    let engineUsage = [];
+
     if (fieldMode === "smart_fields") {
       // ── Smart Fields Engine ──────────────────────────────────────
       const result = await runSmartFieldsTestChat({
@@ -523,6 +545,7 @@ export const testChatAgent = async (req, res) => {
       reply = result.reply;
       nextState = result.nextState;
       updatedState = result.updatedState;
+      engineUsage = result.usage || [];
     } else {
       // ── Classic Engine ───────────────────────────────────────────
       const result = await runClassicTestChat({
@@ -533,24 +556,37 @@ export const testChatAgent = async (req, res) => {
       reply = result.reply;
       nextState = result.nextState;
       updatedState = result.updatedState;
+      engineUsage = result.usage || [];
     }
 
     console.log(`✅ Reply: ${reply?.substring(0, 100)}`);
     console.log(`📍 Next State: ${nextState}`);
 
-    // ── Deduct credits ─────────────────────────────────────────────
+    // ── Settle real cost (@ 50% test markup) ────────────────────────
     let creditsDeducted = null;
     try {
-      console.log("💰 Deducting credits for test chat...");
-      const creditsToDeduct = calculateChatCredits(1, true);
-      const newCredits = Number((user.credits - creditsToDeduct).toFixed(2));
-      await updateUserCredits(user_id, newCredits);
-      creditsDeducted = creditsToDeduct;
-      console.log(
-        `✅ Credits deducted: ${user.credits} → ${newCredits} (-${creditsToDeduct})`,
-      );
+      const settlement = await settleChatFromUsage({
+        userId: user_id,
+        conversationId: `test-chat:${agent_id}:${Date.now()}`, // unique per turn
+        eventId: null,
+        usageArray: engineUsage,
+        feature:
+          fieldMode === "smart_fields"
+            ? "test_chat_smart_fields"
+            : "test_chat_classic",
+        isTest: true, // 50% of production markup, per lead
+      });
+
+      if (settlement) {
+        creditsDeducted = settlement.credits;
+        console.log(
+          `✅ Test chat settled: -${settlement.credits} credits | balance: ${settlement.newBalance}`,
+        );
+      } else {
+        console.log("ℹ️ No Claude usage this turn — nothing charged");
+      }
     } catch (creditError) {
-      console.error("❌ Error deducting credits:", creditError);
+      console.error("❌ Error settling test chat cost:", creditError);
     }
 
     // ── Log test session ───────────────────────────────────────────

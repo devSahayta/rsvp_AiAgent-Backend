@@ -23,6 +23,7 @@ import {
   createParticipant,
   getEventActivityStatus,
   startBatchCallSelected,
+  debugConversationCost,
 } from "../controllers/eventController.js";
 
 import { authenticateUser } from "../middleware/authMiddleware.js";
@@ -122,5 +123,7 @@ router.post("/:eventId/followup-status/sync", syncFollowupStatus);
 
 // Delete
 router.delete("/:eventId", deleteEvent);
+
+router.get("/debug/conversation/:conversationId", debugConversationCost);
 
 export default router;

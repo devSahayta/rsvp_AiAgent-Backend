@@ -11,6 +11,16 @@ import { supabase } from "../config/supabase.js";
 import ASSISTANT_TOOLS from "../utils/assistantTools.js";
 import { executeToolCall } from "../utils/toolExecutor.js";
 
+import { getUserById } from "../models/userModel.js";
+import {
+  MIN_CHAT_CREDIT_HOLD,
+  formatCredits,
+} from "../config/creditPricing.js";
+import {
+  logClaudeUsage,
+  settleConversationCost,
+} from "../models/creditLedgerModel.js";
+
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // Anthropic occasionally returns a transient 5xx "api_error" (server-side
@@ -248,6 +258,20 @@ export async function handleAssistantChat(req, res) {
     const userId = req.user?.user_id;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+    // ✅ Credit pre-check — Claude is never called if this fails
+    const currentUser = await getUserById(userId);
+    if (!currentUser) return res.status(404).json({ error: "User not found" });
+
+    if (currentUser.credits < MIN_CHAT_CREDIT_HOLD) {
+      return res.status(402).json({
+        error: "Insufficient credits",
+        message: "You're out of credits. Please top up to continue chatting.",
+        current_balance: formatCredits(currentUser.credits),
+        required: MIN_CHAT_CREDIT_HOLD,
+      });
+    }
+
+    // Guard: req.body may be undefined if express.json() is not registered
     // Guard: req.body may be undefined if express.json() is not registered
     if (!req.body) {
       return res.status(400).json({
@@ -310,6 +334,11 @@ export async function handleAssistantChat(req, res) {
     // Append new user message
     const messages = [...history, { role: "user", content: fullMessage }];
 
+    // ── NEW: accumulate token usage across this whole turn ──────────────
+    let turnInputTokens = 0;
+    let turnOutputTokens = 0;
+    const usageByCall = []; // optional: keep per-call breakdown too
+
     // ── Round 1: Send to Claude ───────────────────────────────────────────────
     let pendingAction = null; // set if a tool returns action_type (e.g. redirect)
     let pendingConnectionData = null; // set if samvaadik is connected — sends summary to frontend
@@ -320,6 +349,11 @@ export async function handleAssistantChat(req, res) {
       tools: ASSISTANT_TOOLS,
       messages,
     });
+
+    // NEW: capture usage from round 1
+    turnInputTokens += response.usage.input_tokens;
+    turnOutputTokens += response.usage.output_tokens;
+    usageByCall.push({ round: "initial", ...response.usage });
 
     // ── Handle tool_use (loops until Claude gives a final text reply) ─────────
     while (response.stop_reason === "tool_use") {
@@ -453,6 +487,11 @@ export async function handleAssistantChat(req, res) {
         tools: ASSISTANT_TOOLS,
         messages,
       });
+
+      // NEW: capture usage from each subsequent round
+      turnInputTokens += response.usage.input_tokens;
+      turnOutputTokens += response.usage.output_tokens;
+      usageByCall.push({ round: "tool_followup", ...response.usage });
     }
 
     // ── Extract final text reply ──────────────────────────────────────────────
@@ -465,11 +504,38 @@ export async function handleAssistantChat(req, res) {
     // Build updated history for next turn
     const updatedHistory = [...messages, { role: "assistant", content: reply }];
 
+    // ✅ Log each Claude call, sum true cost, apply 3x markup, deduct credits
+    let chatbotCostUsd = 0;
+    for (const usage of usageByCall) {
+      const cost = await logClaudeUsage({
+        userId,
+        conversationId: null,
+        model: "claude-sonnet-4-6",
+        feature: "assistant_chat",
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+      });
+      chatbotCostUsd += cost;
+    }
+
+    const settlement = await settleConversationCost({
+      userId,
+      conversationId: null,
+      conversationType: "chatbot",
+      chatbotCostUsd,
+      voiceCostUsd: 0,
+      telephonyCostUsd: 0,
+    });
+
     return res.status(200).json({
       reply,
       updatedHistory,
       action: pendingAction,
       connectionData: pendingConnectionData || null,
+      credit_info: {
+        credits_charged: settlement.credits,
+        new_balance: settlement.newBalance,
+      },
     });
   } catch (err) {
     console.error("[assistantController] Error:", err);

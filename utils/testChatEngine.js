@@ -34,7 +34,11 @@ async function callClaude({ system, messages, maxTokens = 600 }) {
         },
       );
       console.log(`✅ Claude API success on attempt ${attempt}`);
-      return res.data?.content?.[0]?.text || "";
+      return {
+        text: res.data?.content?.[0]?.text || "",
+        usage: res.data?.usage || null,
+        model: res.data?.model || null,
+      };
     } catch (err) {
       const status = err.response?.status;
       const isRetryable = status === 529 || status === 429 || status === 503;
@@ -155,11 +159,20 @@ Where field can be: rsvp_status, guest_count, notes`;
     };
   }
 
-  const rawReply = await callClaude({
+  const claudeResult = await callClaude({
     system: systemPrompt,
     messages: claudeMessages,
     maxTokens: 400,
   });
+  const rawReply = claudeResult.text;
+  const claudeUsage = [];
+  if (claudeResult.usage) {
+    claudeUsage.push({
+      model: claudeResult.model,
+      input_tokens: claudeResult.usage.input_tokens,
+      output_tokens: claudeResult.usage.output_tokens,
+    });
+  }
 
   // Parse NEXT_STATE and EXTRACTED from reply
   const nextStateMatch = rawReply.match(/NEXT_STATE:\s*(\S+)/);
@@ -202,7 +215,7 @@ Where field can be: rsvp_status, guest_count, notes`;
     field_mode: "classic",
   };
 
-  return { reply: cleanReply, nextState, updatedState };
+  return { reply: cleanReply, nextState, updatedState, usage: claudeUsage };
 }
 
 /* ─────────────────────────────────────────────────────────────────
@@ -239,11 +252,18 @@ export async function runSmartFieldsTestChat({
   const eventName = agent.event_title || "the event";
   const smartFields = agent.smart_fields || [];
 
+  // ✅ Accumulates every callClaude call this turn makes — up to 2
+  // (the completion/Q&A branch and the main field-collection branch are
+  // mutually exclusive per turn, so realistically this is 0 or 1, but
+  // kept as an array for the same pattern used everywhere else).
+  const claudeUsage = [];
+
   if (!smartFields.length) {
     return {
       reply: `Hi! I'm your assistant for "${eventName}". However, no questions have been configured yet. Please contact the organizer.`,
       nextState: "completed",
       updatedState: { callStatus: "completed", field_mode: "smart_fields" },
+      usage: claudeUsage,
     };
   }
 
@@ -280,11 +300,19 @@ export async function runSmartFieldsTestChat({
       );
 
     if (isQuestion && kbContent) {
-      const answerReply = await callClaude({
+      const claudeResult = await callClaude({
         system: `You are an assistant for "${eventName}". Answer guest questions using this knowledge base:\n\n${kbContent}\n\nBe concise and friendly.`,
         messages: [{ role: "user", content: userMessage }],
         maxTokens: 300,
       });
+      const answerReply = claudeResult.text;
+      if (claudeResult.usage) {
+        claudeUsage.push({
+          model: claudeResult.model,
+          input_tokens: claudeResult.usage.input_tokens,
+          output_tokens: claudeResult.usage.output_tokens,
+        });
+      }
 
       return {
         reply: answerReply,
@@ -300,6 +328,7 @@ export async function runSmartFieldsTestChat({
           convo: collectedAnswers,
           field_mode: "smart_fields",
         },
+        usage: claudeUsage,
       };
     }
 
@@ -313,6 +342,7 @@ export async function runSmartFieldsTestChat({
         convo: collectedAnswers,
         field_mode: "smart_fields",
       },
+      usage: claudeUsage, // empty — no Claude call in this branch
     };
   }
 
@@ -375,11 +405,19 @@ FIELD_COLLECTED: {"attendance": "yes"}`;
     };
   }
 
-  const rawReply = await callClaude({
+  const claudeResult = await callClaude({
     system: systemPrompt,
     messages: claudeMessages,
     maxTokens: 400,
   });
+  const rawReply = claudeResult.text;
+  if (claudeResult.usage) {
+    claudeUsage.push({
+      model: claudeResult.model,
+      input_tokens: claudeResult.usage.input_tokens,
+      output_tokens: claudeResult.usage.output_tokens,
+    });
+  }
 
   const fieldCollected = parseFieldCollected(rawReply);
   const cleanReply = rawReply.replace(/\nFIELD_COLLECTED:.*$/m, "").trim();
@@ -423,5 +461,5 @@ FIELD_COLLECTED: {"attendance": "yes"}`;
     field_mode: "smart_fields",
   };
 
-  return { reply: cleanReply, nextState, updatedState };
+  return { reply: cleanReply, nextState, updatedState, usage: claudeUsage };
 }

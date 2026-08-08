@@ -1,9 +1,10 @@
+import { supabase } from "../config/supabase.js";
 import { updateUserCredits, getUserById } from "../models/userModel.js";
-import { 
-  getConversationByParticipant, 
+import {
+  getConversationByParticipant,
   getCompletedCallsByEvent,
   updateConversationWithAPIData,
-  getParticipantsByEvent 
+  getParticipantsByEvent,
 } from "../models/conversationModel.js";
 
 import { elevenlabsApi } from "../utils/elevenlabsApi.js";
@@ -20,7 +21,9 @@ export const reduceCreditsUsingElevenLabsAPI = async (req, res) => {
     const { user_id, batch_id } = req.body;
 
     if (!user_id || !batch_id) {
-      return res.status(400).json({ error: "user_id and batch_id are required" });
+      return res
+        .status(400)
+        .json({ error: "user_id and batch_id are required" });
     }
 
     console.log("🔍 Step 1: Fetching batch info from ElevenLabs...");
@@ -45,11 +48,17 @@ export const reduceCreditsUsingElevenLabsAPI = async (req, res) => {
       conversationMap[conv.conversation_id] = conv;
     });
 
-    const validRecipients = batchInfo.recipients.filter((r) => r.conversation_id);
-    console.log(`✅ Found ${validRecipients.length} recipients with a conversation_id`);
+    const validRecipients = batchInfo.recipients.filter(
+      (r) => r.conversation_id,
+    );
+    console.log(
+      `✅ Found ${validRecipients.length} recipients with a conversation_id`,
+    );
 
     if (validRecipients.length === 0) {
-      return res.status(404).json({ error: "No completed calls found in this batch" });
+      return res
+        .status(404)
+        .json({ error: "No completed calls found in this batch" });
     }
 
     let totalCreditsToDeduct = 0;
@@ -62,6 +71,20 @@ export const reduceCreditsUsingElevenLabsAPI = async (req, res) => {
       if (!conversation) {
         console.warn(`⚠️ Conversation ${conversationId} not found in list`);
         continue;
+      }
+
+      // 🧪 TEST: log real ElevenLabs cost for this conversation
+      try {
+        const details =
+          await elevenlabsApi.getConversationDetails(conversationId);
+        console.log(
+          `[voice-usage] conv=${conversationId} ` +
+            `duration=${details.metadata?.call_duration_secs}s ` +
+            `cost_fiat=$${details.metadata?.cost_fiat} ` +
+            `cost_credits=${details.metadata?.cost}`,
+        );
+      } catch (err) {
+        console.warn(`⚠️ Couldn't fetch cost for ${conversationId}`);
       }
 
       const durationSecs = conversation.call_duration_secs || 0;
@@ -91,10 +114,13 @@ export const reduceCreditsUsingElevenLabsAPI = async (req, res) => {
           conversationId,
           recipient.phone_number,
           durationSecs,
-          status
+          status,
         );
       } catch (error) {
-        console.error(`❌ Error updating conversation ${conversationId}:`, error);
+        console.error(
+          `❌ Error updating conversation ${conversationId}:`,
+          error,
+        );
       }
     }
 
@@ -155,14 +181,18 @@ export const reduceCreditsForBatch = async (req, res) => {
     const { user_id, event_id } = req.body;
 
     if (!user_id || !event_id) {
-      return res.status(400).json({ error: "user_id and event_id are required" });
+      return res
+        .status(400)
+        .json({ error: "user_id and event_id are required" });
     }
 
     const completedCalls = await getCompletedCallsByEvent(event_id);
     console.log("📊 Found calls:", completedCalls.length);
 
     if (completedCalls.length === 0) {
-      return res.status(404).json({ error: "No completed calls found for this event" });
+      return res
+        .status(404)
+        .json({ error: "No completed calls found for this event" });
     }
 
     let totalCreditsToDeduct = 0;
@@ -228,7 +258,9 @@ export const reduceCreditsAfterCall = async (req, res) => {
     const { user_id, participant_id } = req.body;
 
     if (!user_id || !participant_id) {
-      return res.status(400).json({ error: "user_id and participant_id are required" });
+      return res
+        .status(400)
+        .json({ error: "user_id and participant_id are required" });
     }
 
     const conversation = await getConversationByParticipant(participant_id);
@@ -275,5 +307,98 @@ export const reduceCreditsAfterCall = async (req, res) => {
   } catch (error) {
     console.error("❌ Error reducing credits:", error);
     return res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+ * GET /api/credits/logs
+ * Query params: type ('all'|'chatbot'|'voice'), search, range ('today'|'7d'|'30d'|'all'),
+ *               page (default 1), pageSize (default 25)
+ * Returns the logged-in user's own billable turns, newest first.
+ */
+export const getCreditLogs = async (req, res) => {
+  try {
+    const userId = req.user?.user_id;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const {
+      type = "all",
+      search = "",
+      range = "all",
+      page = "1",
+      pageSize = "25",
+    } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const size = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 25));
+    const from = (pageNum - 1) * size;
+    const to = from + size - 1;
+
+    let query = supabase
+      .from("conversation_cost")
+      .select("*", { count: "exact" })
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (type === "chatbot" || type === "voice") {
+      query = query.eq("conversation_type", type);
+    }
+
+    if (range !== "all") {
+      const now = new Date();
+      const since = new Date(now);
+      if (range === "today") since.setHours(0, 0, 0, 0);
+      else if (range === "7d") since.setDate(now.getDate() - 7);
+      else if (range === "30d") since.setDate(now.getDate() - 30);
+      query = query.gte("created_at", since.toISOString());
+    }
+
+    if (search?.trim()) {
+      // Matches on conversation_id or feature — cheap, no join needed.
+      const s = search.trim();
+      query = query.or(`conversation_id.ilike.%${s}%,feature.ilike.%${s}%`);
+    }
+
+    const { data, error, count } = await query.range(from, to);
+    if (error) throw error;
+
+    // Lightweight summary for the header strip — same filters, no pagination.
+    let summaryQuery = supabase
+      .from("conversation_cost")
+      .select("credits_charged, true_cost_usd")
+      .eq("user_id", userId);
+    if (type === "chatbot" || type === "voice") {
+      summaryQuery = summaryQuery.eq("conversation_type", type);
+    }
+    if (range !== "all") {
+      const now = new Date();
+      const since = new Date(now);
+      if (range === "today") since.setHours(0, 0, 0, 0);
+      else if (range === "7d") since.setDate(now.getDate() - 7);
+      else if (range === "30d") since.setDate(now.getDate() - 30);
+      summaryQuery = summaryQuery.gte("created_at", since.toISOString());
+    }
+    const { data: summaryRows } = await summaryQuery;
+    const summary = (summaryRows || []).reduce(
+      (acc, r) => {
+        acc.totalCredits += Number(r.credits_charged || 0);
+        acc.totalTrueCostUsd += Number(r.true_cost_usd || 0);
+        return acc;
+      },
+      { totalCredits: 0, totalTrueCostUsd: 0, count: summaryRows?.length || 0 },
+    );
+    summary.count = summaryRows?.length || 0;
+
+    return res.status(200).json({
+      logs: data || [],
+      page: pageNum,
+      pageSize: size,
+      total: count || 0,
+      totalPages: Math.max(1, Math.ceil((count || 0) / size)),
+      summary,
+    });
+  } catch (err) {
+    console.error("[getCreditLogs] error:", err.message);
+    return res.status(500).json({ error: "Failed to fetch usage logs" });
   }
 };

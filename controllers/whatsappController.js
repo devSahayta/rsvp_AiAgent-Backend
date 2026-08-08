@@ -17,14 +17,50 @@ import { autoExtractFromImage } from "../utils/autoExtractor.js";
 import {
   CREDIT_PRICING,
   calculateChatCredits,
+  MIN_CHAT_CREDIT_HOLD,
+  formatCredits,
 } from "../config/creditPricing.js";
 import { getUserById, updateUserCredits } from "../models/userModel.js";
+import {
+  settleChatFromUsage,
+  logOcrUsage,
+} from "../models/creditLedgerModel.js";
 import { generalChatEngine } from "../utils/generalChatEngine.js";
 
 import {
   saveUploadRow,
   saveTravelItinerary,
 } from "../utils/documentStorage.js";
+
+// Computes + logs the combined Vision + Claude cost of a document
+// extraction attempt, returns the USD total to feed into settleChatFromUsage's
+// ocrCostUsd param. Returns 0 (no-op) if nothing was actually extracted.
+async function computeAndLogOcrCost({
+  userId,
+  conversationId,
+  participantId,
+  eventId,
+  visionUnits,
+  claudeUsage,
+  documentType,
+}) {
+  const hasVision = visionUnits && visionUnits > 0;
+  const hasClaudeUsage = claudeUsage && claudeUsage.length > 0;
+  if (!hasVision && !hasClaudeUsage) return 0;
+
+  const claude = claudeUsage?.[0] || {};
+  return await logOcrUsage({
+    userId,
+    conversationId,
+    participantId,
+    eventId,
+    visionUnits: visionUnits || 0,
+    claudeInputTokens: claude.input_tokens || 0,
+    claudeOutputTokens: claude.output_tokens || 0,
+    claudeModel: claude.model || "claude-haiku-4-5-20251001",
+    documentType: documentType || "travel_ticket",
+  });
+}
 
 const convoCache = new Map();
 const BUCKET_NAME = process.env.SUPABASE_BUCKET || "participant-docs";
@@ -511,24 +547,23 @@ export const handleIncomingMessage = async (req, res) => {
       `[CREDITS] 🔑 Resolved user_id: ${userId} for event: ${eventId}`,
     );
 
-    // ── Pre-flight low-credit warning (never blocks) ─────────────────────
+    // ── Credit pre-check — blocks BEFORE any engine/Claude call ──────────
     if (userId) {
       try {
         const creditUser = await getUserById(userId);
-        const requiredCredits = CREDIT_PRICING.PRODUCTION_CHAT_PER_MESSAGE;
-
-        if (creditUser && creditUser.credits <= 0) {
+        if (creditUser && creditUser.credits < MIN_CHAT_CREDIT_HOLD) {
           console.warn(
-            `[CREDITS] ⚠️ User ${userId} has 0 credits — message still goes through`,
+            `[CREDITS] ⛔ User ${userId} below threshold (${creditUser.credits} < ${MIN_CHAT_CREDIT_HOLD}) — blocking reply`,
           );
-        } else if (creditUser && creditUser.credits < requiredCredits * 5) {
-          console.warn(
-            `[CREDITS] ⚠️ Low balance for user ${userId}: ${creditUser.credits} credits remaining`,
+          await sendWhatsAppTextMessage(
+            from,
+            `Sorry, we're temporarily unable to process your message. Please contact the event organizer.`,
           );
+          return res.sendStatus(200);
         }
       } catch (e) {
         console.error(
-          "[CREDITS] ❌ Pre-flight check failed (non-blocking):",
+          "[CREDITS] ❌ Pre-check failed — allowing through (fail open):",
           e.message,
         );
       }
@@ -589,6 +624,8 @@ export const handleIncomingMessage = async (req, res) => {
       (incomingType === "image" || incomingType === "document");
 
     let extractionResult = null;
+    let classicOcrVisionUnits = 0;
+    let classicOcrClaudeUsage = [];
     if (shouldExtract) {
       console.log(
         "🤖 Running automatic travel doc extraction (state: " +
@@ -598,6 +635,10 @@ export const handleIncomingMessage = async (req, res) => {
 
       extractionResult = await autoExtractFromImage({ documentUrl: publicUrl });
       console.log("📤 Extraction result:", extractionResult);
+      classicOcrVisionUnits = extractionResult?.visionUnits || 0;
+      classicOcrClaudeUsage = extractionResult?.claudeUsage
+        ? [extractionResult.claudeUsage]
+        : [];
 
       if (extractionResult?.success && extractionResult.extractedData) {
         const data = extractionResult.extractedData;
@@ -643,19 +684,28 @@ export const handleIncomingMessage = async (req, res) => {
         "[whatsappController] 🤖 Smart fields mode — routing to agentChatEngine",
       );
 
-      let agentReply;
+      let agentReply = null;
+      let agentUsage = [];
+      let agentOcrVisionUnits = 0;
+      let agentOcrClaudeUsage = [];
       try {
-        agentReply = await agentChatEngine({
+        const result = await agentChatEngine({
           phoneNumber: from,
           userMessage: userText || "",
           mediaUrl: publicUrl || null,
           mediaType: incomingType,
-          storagePath: storedMediaPath || null, // ADD — this is the actual fix for this path
+          storagePath: storedMediaPath || null,
           eventId,
           participantId: participant.participant_id,
           guestName: displayName,
           event: fullEvent,
         });
+        if (result !== null) {
+          agentReply = result.reply;
+          agentUsage = result.usage || [];
+          agentOcrVisionUnits = result.ocrVisionUnits || 0;
+          agentOcrClaudeUsage = result.ocrClaudeUsage || [];
+        }
       } catch (agentErr) {
         console.error("[whatsappController] agentChatEngine error:", agentErr);
         agentReply = null;
@@ -692,19 +742,45 @@ export const handleIncomingMessage = async (req, res) => {
           await sendWhatsAppTextMessage(from, agentReply);
         }
 
-        // ── Deduct credits ───────────────────────────────────────────────
-        const creditResult = await deductProductionChatCredits(userId, {
-          participant_id: pid,
-          event_id: eventId,
-          phone: from,
-          state: "smart_fields",
+        // ── ✅ Settle real token-based cost (classic mode / decideNextStep) ──
+        const classicOcrCostUsd = await computeAndLogOcrCost({
+          userId,
+          conversationId: `${pid}:ocr:${Date.now()}`,
+          participantId: pid,
+          eventId,
+          visionUnits: classicOcrVisionUnits,
+          claudeUsage: classicOcrClaudeUsage,
         });
 
-        if (creditResult) {
+        // ── Settle credits (real token cost if Claude ran this turn) ─────
+        const smartOcrCostUsd = await computeAndLogOcrCost({
+          userId,
+          conversationId: `${pid}:ocr:${Date.now()}`,
+          participantId: pid,
+          eventId,
+          visionUnits: agentOcrVisionUnits,
+          claudeUsage: agentOcrClaudeUsage,
+        });
+
+        const settlement = await settleChatFromUsage({
+          userId,
+          conversationId: `${pid}:${Date.now()}`,
+          eventId,
+          usageArray: agentUsage,
+          feature: "whatsapp_smart_fields",
+          ocrCostUsd: smartOcrCostUsd,
+        });
+
+        if (settlement) {
           console.log(
-            `[CREDITS] 💰 Result: -${creditResult.creditsDeducted} | ` +
-              `balance: ${creditResult.newBalance}` +
-              (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
+            `[CREDITS] 💰 Settled: -${settlement.credits} credits | ` +
+              `balance: ${settlement.newBalance}`,
+          );
+        } else {
+          // decision.usage was empty (e.g. AI call failed and fell back to a
+          // canned reply with no Claude cost) — nothing to charge for.
+          console.log(
+            `[CREDITS] ℹ️ No Claude usage this turn — nothing charged`,
           );
         }
 
@@ -930,20 +1006,35 @@ export const handleIncomingMessage = async (req, res) => {
     // ── Send WhatsApp message ────────────────────────────────────────────
     await sendWhatsAppTextMessage(from, finalReply);
 
-    // ── ✅ DEDUCT PRODUCTION CREDITS (only after successful send) ────────
-    const creditResult = await deductProductionChatCredits(userId, {
-      participant_id: pid,
-      event_id: eventId,
-      phone: from,
-      state: nextState,
+    // ── Settle credits (real token cost if Claude ran this turn) ─────
+    const settlement = await settleChatFromUsage({
+      userId,
+      conversationId: `${pid}:${Date.now()}`,
+      eventId,
+      usageArray: agentUsage,
+      feature: "whatsapp_smart_fields",
     });
 
-    if (creditResult) {
+    if (settlement) {
       console.log(
-        `[CREDITS] 💰 Result: -${creditResult.creditsDeducted} | ` +
-          `balance: ${creditResult.newBalance}` +
-          (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
+        `[CREDITS] 💰 Settled: -${settlement.credits} credits | balance: ${settlement.newBalance}`,
       );
+    } else {
+      // No Claude call this turn (e.g. document/travel_ticket field
+      // handled deterministically) — fall back to legacy flat charge.
+      const creditResult = await deductProductionChatCredits(userId, {
+        participant_id: pid,
+        event_id: eventId,
+        phone: from,
+        state: "smart_fields",
+      });
+      if (creditResult) {
+        console.log(
+          `[CREDITS] 💰 Result: -${creditResult.creditsDeducted} | ` +
+            `balance: ${creditResult.newBalance}` +
+            (creditResult.wasInsufficient ? " (⚠️ insufficient)" : ""),
+        );
+      }
     }
 
     // ── Save messages to chat logs ───────────────────────────────────────
@@ -1371,8 +1462,50 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     const userId = fullEvent.user_id;
 
+    // ── Credit pre-check — blocks BEFORE any engine/Claude call ──────────
+    try {
+      const creditUser = await getUserById(userId);
+      if (creditUser && creditUser.credits < MIN_CHAT_CREDIT_HOLD) {
+        console.warn(
+          `[CREDITS] ⛔ User ${userId} below threshold (${creditUser.credits} < ${MIN_CHAT_CREDIT_HOLD}) — blocking reply`,
+        );
+        const axiosLib = (await import("axios")).default;
+        const { data: conn } = await supabase
+          .from("samvaadik_connections")
+          .select("api_key, status")
+          .eq("user_id", userId)
+          .maybeSingle();
+        if (conn?.api_key && conn.status === "active") {
+          await axiosLib.post(
+            `${process.env.SAMVAADIK_BASE_URL}/messages/text`,
+            {
+              phone: `+${normalised}`,
+              message: `Sorry, we're temporarily unable to process your message. Please contact the event organizer.`,
+            },
+            {
+              headers: {
+                "X-API-Key": conn.api_key,
+                "Content-Type": "application/json",
+                "x-skip-window-check": "true",
+              },
+              timeout: 10000,
+            },
+          );
+        }
+        return res.sendStatus(200);
+      }
+    } catch (e) {
+      console.error(
+        "[CREDITS] ❌ Pre-check failed — allowing through (fail open):",
+        e.message,
+      );
+    }
+
     // ── 5. Route to the right engine based on field_mode ─────────────────────
     let agentReply;
+    let engineUsage = []; // populated by decideNextStep (classic) or agentChatEngine (smart_fields)
+    let webhookOcrVisionUnits = 0;
+    let webhookOcrClaudeUsage = [];
 
     if (fullEvent.field_mode === "smart_fields") {
       if (activeSession) {
@@ -1431,18 +1564,26 @@ export const handleSamvaadikWebhook = async (req, res) => {
         }
 
         try {
-          agentReply = await agentChatEngine({
+          const result = await agentChatEngine({
             phoneNumber: normalised,
             userMessage: userText,
             mediaUrl:
               incomingType !== "text" ? req.body.media_url || null : null,
             mediaType: incomingType,
-            storagePath: smartStoredMediaPath, // NEW
+            storagePath: smartStoredMediaPath,
             eventId,
             participantId: pid,
             guestName: displayName,
             event: fullEvent,
           });
+          if (result !== null) {
+            agentReply = result.reply;
+            engineUsage = result.usage || [];
+            webhookOcrVisionUnits = result.ocrVisionUnits || 0;
+            webhookOcrClaudeUsage = result.ocrClaudeUsage || [];
+          } else {
+            agentReply = `Sorry ${displayName}, I had a technical issue. Please try again.`;
+          }
         } catch (err) {
           console.error(
             "[samvaadikWebhook] agentChatEngine error:",
@@ -1455,13 +1596,15 @@ export const handleSamvaadikWebhook = async (req, res) => {
           `[samvaadikWebhook] 💬 General chat mode — session ${completedSession.session_id}`,
         );
         try {
-          agentReply = await generalChatEngine({
+          const result = await generalChatEngine({
             phoneNumber: normalised,
             userMessage: userText,
             primarySession: completedSession,
             allSessions,
             event: fullEvent,
           });
+          agentReply = result.reply;
+          engineUsage = result.usage || [];
         } catch (err) {
           console.error(
             "[samvaadikWebhook] generalChatEngine error:",
@@ -1563,9 +1706,9 @@ export const handleSamvaadikWebhook = async (req, res) => {
       }
 
       agentReply = decision.reply;
+      engineUsage = decision.usage || [];
       const nextState = decision.nextState || callStatus;
       const actions = decision.actions || { updateDB: false, fields: {} };
-
       // ── NEW: persist cacheUpdate so context survives across turns ──────────
       if (actions.cacheUpdate) {
         if (actions.cacheUpdate.currentDocName !== undefined)
@@ -1622,6 +1765,10 @@ export const handleSamvaadikWebhook = async (req, res) => {
                   documentUrl: req.body.media_url,
                 });
                 console.log("📤 Extraction result:", extractionResult);
+                webhookOcrVisionUnits = extractionResult?.visionUnits || 0;
+                webhookOcrClaudeUsage = extractionResult?.claudeUsage
+                  ? [extractionResult.claudeUsage]
+                  : [];
 
                 if (
                   extractionResult?.success &&
@@ -1749,18 +1896,52 @@ export const handleSamvaadikWebhook = async (req, res) => {
 
     console.log("[samvaadikWebhook] ✅ Reply sent to", normalised);
 
-    // ── 7. Deduct credits ────────────────────────────────────────────────────
-    await deductProductionChatCredits(userId, {
-      participant_id: pid,
-      event_id: eventId,
-      phone: normalised,
-      state:
-        fullEvent.field_mode === "smart_fields"
-          ? activeSession
-            ? "smart_fields_rsvp"
-            : "smart_fields_general"
-          : "classic_rsvp",
+    // ── 7. Settle credits ───────────────────────────────────────────────────
+    const settlementFeature =
+      fullEvent.field_mode === "smart_fields"
+        ? activeSession
+          ? "samvaadik_smart_fields_rsvp"
+          : "samvaadik_smart_fields_general"
+        : "samvaadik_classic_rsvp";
+
+    const webhookOcrCostUsd = await computeAndLogOcrCost({
+      userId,
+      conversationId: `${pid}:ocr:${Date.now()}`,
+      participantId: pid,
+      eventId,
+      visionUnits: webhookOcrVisionUnits,
+      claudeUsage: webhookOcrClaudeUsage,
     });
+
+    const settlement = await settleChatFromUsage({
+      userId,
+      conversationId: `${pid}:${Date.now()}`,
+      eventId,
+      usageArray: engineUsage,
+      feature: settlementFeature,
+      ocrCostUsd: webhookOcrCostUsd,
+    });
+
+    if (settlement) {
+      console.log(
+        `[CREDITS] 💰 Settled: -${settlement.credits} credits | balance: ${settlement.newBalance}`,
+      );
+    } else {
+      // Not classic mode (smart_fields via agentChatEngine/generalChatEngine),
+      // or classic call produced no usage — fall back to legacy flat deduction
+      // until those engines are migrated to return real usage too.
+      await deductProductionChatCredits(userId, {
+        participant_id: pid,
+        event_id: eventId,
+        phone: normalised,
+        state:
+          fullEvent.field_mode === "smart_fields"
+            ? activeSession
+              ? "smart_fields_rsvp"
+              : "smart_fields_general"
+            : "classic_rsvp",
+      });
+    }
 
     // ── 8. Save to chat logs ─────────────────────────────────────────────────
     try {

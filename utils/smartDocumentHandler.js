@@ -143,6 +143,21 @@ export async function handleDocumentField({
   });
 
   const extraction = await autoExtractFromImage({ documentUrl: mediaUrl });
+
+  // Real cost of this extraction attempt — billable even if extraction
+  // ultimately failed (the Vision/Claude calls still happened and still cost
+  // money). Caller (agentChatEngine.js) reads this off the return value.
+  const ocrVisionUnits = extraction.visionUnits || 0;
+  const ocrClaudeUsage = extraction.claudeUsage
+    ? [
+        {
+          model: extraction.claudeUsage.model,
+          input_tokens: extraction.claudeUsage.input_tokens,
+          output_tokens: extraction.claudeUsage.output_tokens,
+        },
+      ]
+    : [];
+
   if (extraction.success && uploadResult?.[0]?.upload_id) {
     await saveTravelItinerary({
       participant_id: participantId,
@@ -168,6 +183,8 @@ export async function handleDocumentField({
       value: null,
       advance: false,
       newFieldState: { travel_direction: "return" },
+      ocrVisionUnits,
+      ocrClaudeUsage,
     };
   }
 
@@ -178,5 +195,7 @@ export async function handleDocumentField({
     value: "both_uploaded",
     advance: true,
     newFieldState: {},
+    ocrVisionUnits,
+    ocrClaudeUsage,
   };
 }

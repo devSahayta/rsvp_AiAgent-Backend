@@ -402,3 +402,27 @@ export const getCreditLogs = async (req, res) => {
     return res.status(500).json({ error: "Failed to fetch usage logs" });
   }
 };
+
+/**
+ * GET /api/credits/packages
+ * Public-ish (still behind auth like the rest of the app) — returns active
+ * credit packages, ordered for display. No user-specific data.
+ */
+export const getCreditPackages = async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("credit_packages")
+      .select(
+        "id, name, credits, price_inr, is_popular, display_order, features",
+      )
+      .eq("is_active", true)
+      .order("display_order", { ascending: true });
+
+    if (error) throw error;
+
+    return res.status(200).json({ packages: data || [] });
+  } catch (err) {
+    console.error("[getCreditPackages] error:", err.message);
+    return res.status(500).json({ error: "Failed to fetch credit packages" });
+  }
+};

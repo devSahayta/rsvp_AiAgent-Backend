@@ -28,13 +28,13 @@ import voiceRoutes from "./routes/voiceRoutes.js";
 import samvaadikRoutes from "./routes/samvaadikRoutes.js";
 import retryAutomationRoutes from "./routes/retryAutomationRoutes.js";
 import internalRoutes from "./routes/internalRoutes.js";
+import { razorpayWebhookHandler } from "./controllers/creditPurchaseController.js";
 
 dotenv.config();
 startVoiceTestSyncCron();
 startProductionBatchSyncCron();
 
 const app = express();
-app.use(express.json());
 
 // CORS: allow your frontend origin(s)
 app.use(
@@ -47,6 +47,23 @@ app.use(
     credentials: true,
   }),
 );
+
+// ⚠️ Razorpay webhook — MUST be registered here, BEFORE express.json()
+// below. Signature verification requires the exact raw bytes Razorpay
+// sent; once express.json() parses the body into a JS object, those
+// original bytes are gone and re-serializing with JSON.stringify() can
+// produce different bytes (key order, whitespace), causing every webhook
+// signature check to fail silently. This route intentionally bypasses
+// the global JSON parser and does its own raw parsing instead.
+// No authenticateUser here either — Razorpay calls this server-to-server
+// with no user session; the signature check IS the authentication.
+app.post(
+  "/api/credits/purchase/webhook",
+  express.raw({ type: "application/json" }),
+  razorpayWebhookHandler,
+);
+
+app.use(express.json());
 
 // Always extract token (if present) so authenticateUser can rely on req.user
 app.use(extractKindeUser);

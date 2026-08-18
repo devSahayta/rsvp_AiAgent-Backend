@@ -154,6 +154,45 @@ export async function logOcrUsage({
   return totalCostUsd; // combined — caller adds this into ocrCostUsd for settlement
 }
 
+// ── Adding credits (purchases) ──────────────────────────────────────────────
+
+/**
+ * Adds `credits` to userId's balance, writes one credit_ledger row.
+ * Mirrors deductCredits exactly, just the opposite direction. Must be
+ * called from an idempotent caller (see razorpayService.js's
+ * markPurchasePaidAndCredit) — this function itself does not check for
+ * duplicate calls.
+ */
+export async function addCreditsToBalance({
+  userId,
+  credits,
+  type = "purchase",
+  note,
+}) {
+  const user = await getUserById(userId);
+  if (!user) throw new Error("User not found");
+
+  const newBalance = formatCredits(user.credits + credits);
+  await updateUserCredits(userId, newBalance);
+
+  console.log(
+    `[credit-ledger] user=${userId} added=${credits} ` +
+      `${formatCredits(user.credits)} -> ${newBalance}`,
+  );
+
+  const { error } = await supabase.from("credit_ledger").insert({
+    user_id: userId,
+    conversation_id: null,
+    type,
+    credits, // positive, unlike deductCredits' negative
+    balance_after: newBalance,
+    note,
+  });
+  if (error) console.error("[credit-ledger] write failed:", error.message);
+
+  return { previousBalance: formatCredits(user.credits), newBalance };
+}
+
 // ── Deduction (the only place that actually moves the balance) ─────────────
 
 /**
